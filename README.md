@@ -1,0 +1,1 @@
+# typesafe-ai-scala-sdk
