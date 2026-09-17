@@ -5,6 +5,10 @@ import scala.concurrent.duration.*
 final case class Ticket(subject: String, priority: Option[Int], tags: List[String], channel: Channel) derives ToJson
 enum Channel derives ToJson:
   case Email, Chat
+enum Shape derives ToJson:
+  case Circle(radius: Double)
+  case Box(width: Int, height: Int, label: Option[String])
+  case Dot
 
 class UnitSuite extends munit.FunSuite:
 
@@ -20,9 +24,23 @@ class UnitSuite extends munit.FunSuite:
       """{"n":1,"s":"x","o":null,"l":[1,2]}""")
   }
 
+  test("malformed numbers and deep nesting are parse errors, not exceptions") {
+    assert(Json.parse("1e99999999999").left.exists(_.contains("out of range")))
+    assert(Json.parse("[" * 100000).left.exists(_.contains("nesting")))
+    assert(Json.parse("{\"a\":" * 100000).left.exists(_.contains("nesting")))
+    assertEquals(Json.parse("[" * 512 + "]" * 512).map(_ => ()), Right(()))
+  }
+
   test("derived ToJson for case classes and enums") {
     val t = Ticket("Payouts", None, List("stripe"), Channel.Chat)
     assertEquals(ToJson[Ticket](t).render, """{"subject":"Payouts","tags":["stripe"],"channel":"Chat"}""")
+  }
+
+  test("derived ToJson for enums with parameterized cases") {
+    assertEquals(ToJson[Shape](Shape.Circle(1.5)).render, """{"radius":1.5}""")
+    assertEquals(ToJson[Shape](Shape.Box(2, 3, None)).render, """{"width":2,"height":3}""")
+    assertEquals(ToJson[Shape](Shape.Dot).render, "\"Dot\"")
+    assertEquals(ToJson[List[Shape]](List(Shape.Dot, Shape.Circle(1))).render, """["Dot",{"radius":1.0}]""")
   }
 
   test("questions serialize like the API reference and keep order") {
@@ -138,6 +156,9 @@ class UnitSuite extends munit.FunSuite:
     val noEnv: String => Option[String] = _ => None
     intercept[ConfigException](TypeSafeClient(ClientConfig(env = noEnv)))
     intercept[ConfigException](TypeSafeClient(ClientConfig(apiKey = Some("k"), timeout = Duration.Zero, env = noEnv)))
+    intercept[ConfigException](TypeSafeClient(ClientConfig(apiKey = Some("k"), baseUrl = Some("not a url"), env = noEnv)))
+    intercept[ConfigException](TypeSafeClient(ClientConfig(apiKey = Some("k"), baseUrl = Some("/v1"), env = noEnv)))
+    intercept[ConfigException](TypeSafeClient(ClientConfig(apiKey = Some("k"), baseUrl = Some("ftp://h"), env = noEnv)))
     val env = Map("TYPESAFE_API_KEY" -> "  envkey ", "TYPESAFE_BASE_URL" -> "http://h:1///", "TYPESAFE_DEFAULT_MODEL" -> "   ")
     val c = TypeSafeClient(ClientConfig(env = env.get))
     assertEquals(c.baseUrl, "http://h:1")

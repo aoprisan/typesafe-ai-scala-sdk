@@ -11,7 +11,14 @@ import scala.jdk.CollectionConverters.*
 
 /** A tiny programmable HTTP mock on the JDK's built-in server. */
 final class MockApi:
-  final case class Reply(status: Int, body: String = "", headers: Map[String, String] = Map.empty, delay: FiniteDuration = Duration.Zero)
+  /** `delay` waits before the headers; `stall` sends the headers and `body` as a partial response, then waits. */
+  final case class Reply(
+      status: Int,
+      body: String = "",
+      headers: Map[String, String] = Map.empty,
+      delay: FiniteDuration = Duration.Zero,
+      stall: FiniteDuration = Duration.Zero
+  )
   final case class Received(method: String, path: String, headers: Map[String, String], body: String):
     def header(name: String): Option[String] = headers.collectFirst { case (k, v) if k.equalsIgnoreCase(name) => v }
 
@@ -28,8 +35,14 @@ final class MockApi:
     reply.headers.foreach((k, v) => exchange.getResponseHeaders.add(k, v))
     val bytes = reply.body.getBytes(UTF_8)
     try
-      exchange.sendResponseHeaders(reply.status, if bytes.isEmpty then -1 else bytes.length)
-      if bytes.nonEmpty then exchange.getResponseBody.write(bytes)
+      if reply.stall > Duration.Zero then
+        exchange.sendResponseHeaders(reply.status, bytes.length + 1000)
+        exchange.getResponseBody.write(bytes)
+        exchange.getResponseBody.flush()
+        Thread.sleep(reply.stall.toMillis)
+      else
+        exchange.sendResponseHeaders(reply.status, if bytes.isEmpty then -1 else bytes.length)
+        if bytes.nonEmpty then exchange.getResponseBody.write(bytes)
     catch case _: java.io.IOException => ()
     finally exchange.close()
   })
@@ -180,6 +193,16 @@ class ClientSuite extends munit.FunSuite:
       client(RetryPolicy.none).systemOne("x", questions, CallOptions(timeout = Some(50.millis)))
     )
     assertEquals(e.timeout, 50.millis)
+  }
+
+  test("a body that stalls after the headers also times out") {
+    api.respond(_ => Reply(200, okBody.take(20), stall = 3.seconds))
+    val t0 = System.nanoTime()
+    val e = intercept[TimeoutException](
+      client(RetryPolicy.none).systemOne("x", questions, CallOptions(timeout = Some(100.millis)))
+    )
+    assert((System.nanoTime() - t0).nanos < 2.seconds)
+    assertEquals(e.timeout, 100.millis)
   }
 
   test("connection errors are retried then surface") {

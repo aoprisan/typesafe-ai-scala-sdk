@@ -3,7 +3,7 @@ package typesafe
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse, HttpTimeoutException}
 import java.nio.charset.StandardCharsets.UTF_8
-import java.util.concurrent.{CompletableFuture, CompletionException, ExecutionException, TimeUnit}
+import java.util.concurrent.{CancellationException, CompletableFuture, CompletionException, ExecutionException, TimeUnit}
 import scala.collection.immutable.VectorMap
 import scala.concurrent.Future
 import scala.concurrent.duration.*
@@ -198,17 +198,21 @@ final class TypeSafeClient private (
     if log.isLoggable(System.Logger.Level.DEBUG) then
       log.log(System.Logger.Level.DEBUG, s"$endpoint -> headers=${redacted(headers)} body=${body.getOrElse("")}")
     val t0 = System.nanoTime()
-    http
-      .sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
+    val sent = http.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
+    // `HttpRequest.timeout` only bounds the wait for response headers; a body that stalls afterwards
+    // would hang. Cancelling the exchange at the deadline covers the whole attempt.
+    CompletableFuture.delayedExecutor(attemptTimeout.toNanos, TimeUnit.NANOSECONDS).execute(() => sent.cancel(true))
+    sent
       .handle[(Json, ResponseMeta, String)] { (resp, err) =>
         if err != null then
           val cause = unwrap(err)
-          log.log(System.Logger.Level.INFO, s"$endpoint <- ${cause.getClass.getSimpleName}")
-          throw (cause match
-            case t: HttpTimeoutException => TimeoutException(attemptTimeout, t)
-            case e: TypeSafeException    => e
-            case other                   => ConnectionException(other)
-          )
+          val mapped = cause match
+            case t: HttpTimeoutException  => TimeoutException(attemptTimeout, t)
+            case t: CancellationException => TimeoutException(attemptTimeout, t)
+            case e: TypeSafeException     => e
+            case other                    => ConnectionException(other)
+          log.log(System.Logger.Level.INFO, s"$endpoint <- ${mapped.getClass.getSimpleName}")
+          throw mapped
         val status = resp.statusCode()
         val respHeaders = resp.headers().map().asScala.view.mapValues(_.asScala.toList).toMap
         val bytes = resp.body()
@@ -251,8 +255,12 @@ object TypeSafeClient:
     if key.exists(c => c == '\r' || c == '\n') then throw ConfigException("The API key contains invalid characters.")
     checkTimeout(config.timeout)
     config.retry.validate()
+    val baseUrl = resolve(config.baseUrl, Constants.BaseUrlEnv).getOrElse(Constants.DefaultBaseUrl).reverse.dropWhile(_ == '/').reverse
+    val parsed = scala.util.Try(new URI(baseUrl)).toOption
+    if !parsed.exists(u => (u.getScheme == "http" || u.getScheme == "https") && u.getHost != null) then
+      throw ConfigException(s"baseUrl must be an absolute http(s) URL, got '$baseUrl'.")
     new TypeSafeClient(
-      baseUrl = resolve(config.baseUrl, Constants.BaseUrlEnv).getOrElse(Constants.DefaultBaseUrl).reverse.dropWhile(_ == '/').reverse,
+      baseUrl = baseUrl,
       defaultModel = resolve(config.model, Constants.DefaultModelEnv).getOrElse(Constants.DefaultModel),
       timeout = config.timeout,
       retry = config.retry,

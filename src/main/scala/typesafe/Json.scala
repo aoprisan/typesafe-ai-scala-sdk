@@ -112,8 +112,12 @@ object Json:
 
   private final class ParseError(msg: String) extends Exception(msg)
 
+  /** Deepest array/object nesting the parser accepts; deeper input fails instead of overflowing the stack. */
+  private val MaxDepth = 512
+
   private final class Parser(s: String):
     var pos = 0
+    private var depth = 0
 
     private def fail(what: String): Nothing = throw ParseError(s"$what at offset $pos")
 
@@ -136,12 +140,18 @@ object Json:
         case c if c == '-' || c.isDigit => num()
         case c => fail(s"unexpected character '$c'")
 
+    private def enter(): Unit =
+      depth += 1
+      if depth > MaxDepth then fail(s"nesting deeper than $MaxDepth levels")
+
     private def obj(): Json =
       pos += 1
+      enter()
       val b = VectorMap.newBuilder[String, Json]
       skipWs()
       if pos < s.length && s.charAt(pos) == '}' then
         pos += 1
+        depth -= 1
         return Obj(VectorMap.empty)
       var more = true
       while more do
@@ -155,14 +165,17 @@ object Json:
         if pos < s.length && s.charAt(pos) == ',' then pos += 1
         else if pos < s.length && s.charAt(pos) == '}' then { pos += 1; more = false }
         else fail("expected ',' or '}'")
+      depth -= 1
       Obj(b.result())
 
     private def arr(): Json =
       pos += 1
+      enter()
       val b = Vector.newBuilder[Json]
       skipWs()
       if pos < s.length && s.charAt(pos) == ']' then
         pos += 1
+        depth -= 1
         return Arr(Vector.empty)
       var more = true
       while more do
@@ -171,6 +184,7 @@ object Json:
         if pos < s.length && s.charAt(pos) == ',' then pos += 1
         else if pos < s.length && s.charAt(pos) == ']' then { pos += 1; more = false }
         else fail("expected ',' or ']'")
+      depth -= 1
       Arr(b.result())
 
     private def string(): String =
@@ -223,7 +237,9 @@ object Json:
         pos += 1
         if pos < s.length && (s.charAt(pos) == '+' || s.charAt(pos) == '-') then pos += 1
         digits()
-      Num(BigDecimal(s.substring(start, pos)))
+      val text = s.substring(start, pos)
+      try Num(BigDecimal(text))
+      catch case _: NumberFormatException => fail(s"number '$text' is out of range")
 
 /** A value already converted to [[Json]]; lets `Json.obj("a" -> 1, "b" -> "x")` accept mixed types. */
 final class JsonValue(val json: Json)
@@ -262,7 +278,7 @@ object ToJson:
       case p: Mirror.ProductOf[A] =>
         productEncoder[A](constValueTuple[p.MirroredElemLabels].toList.asInstanceOf[List[String]], summonAll[p.MirroredElemTypes])
       case s: Mirror.SumOf[A] =>
-        sumEncoder[A](s.ordinal, summonAll[s.MirroredElemTypes])
+        sumEncoder[A](s.ordinal, summonCases[s.MirroredElemTypes])
 
   private def productEncoder[A](labels: List[String], encs: List[ToJson[?]]): ToJson[A] = a =>
     val values = a.asInstanceOf[Product].productIterator
@@ -279,13 +295,27 @@ object ToJson:
       case _: EmptyTuple => Nil
       case _: (t *: ts)  => summonOrDerive[t] :: summonAll[ts]
 
-  // Singletons (enum cases, case objects) are checked first: ToJson is contravariant, so the sum's own
-  // instance would otherwise be found for its cases and refer to itself.
+  // Product fields: singletons, then an instance in scope, then derivation.
   private inline def summonOrDerive[T]: ToJson[?] =
     scala.compiletime.summonFrom {
       case _: ValueOf[T]   => singleton[T]
       case e: ToJson[T]    => e
       case m: Mirror.Of[T] => derived[T](using m)
+    }
+
+  private inline def summonCases[T <: Tuple]: List[ToJson[?]] =
+    inline erasedValue[T] match
+      case _: EmptyTuple => Nil
+      case _: (t *: ts)  => summonCase[t] :: summonCases[ts]
+
+  // Sum cases: ToJson is contravariant, so the instance of the sum being derived would satisfy
+  // `ToJson[Case]` and refer to itself. Singletons and mirrored cases are therefore encoded before
+  // looking for an instance in scope.
+  private inline def summonCase[T]: ToJson[?] =
+    scala.compiletime.summonFrom {
+      case _: ValueOf[T]   => singleton[T]
+      case m: Mirror.Of[T] => derived[T](using m)
+      case e: ToJson[T]    => e
     }
 
   private def singleton[T]: ToJson[T] = a => Json.Str(a.toString)

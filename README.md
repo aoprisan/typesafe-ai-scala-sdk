@@ -170,7 +170,7 @@ All failures extend the sealed `TypeSafeException`:
 
 | Exception                     | When                                                                    |
 | ----------------------------- | ----------------------------------------------------------------------- |
-| `ConfigException`             | missing API key, non-positive timeout, invalid retry policy             |
+| `ConfigException`             | missing API key, invalid base URL, non-positive timeout, invalid retry policy |
 | `InvalidRequestException`     | no questions, empty score criteria, malformed raw question, unencodable state |
 | `ApiException`                | non-2xx after retries; `kind`, `detail`, `body`, `requestId`, `retryAfter` |
 | `ConnectionException`         | no response (DNS, connect, reset, read)                                 |
