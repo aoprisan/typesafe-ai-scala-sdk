@@ -24,7 +24,8 @@ typed questions and get typed answers back.
 libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala" % "0.1.0"
 ```
 
-Not published yet; use `sbt publishLocal` for now.
+Not on Maven Central yet; use `sbt publishLocal` until the first `v*` tag is pushed.
+See [RELEASING.md](RELEASING.md) for how releases are cut.
 
 ## Quick start
 
