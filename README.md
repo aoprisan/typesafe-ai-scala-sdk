@@ -15,16 +15,36 @@ typed questions and get typed answers back.
   defaults, retry semantics, error classification and forward-compatible decoding.
 - Scala 3.3 LTS, JDK 17+.
 - Three flavours per call: blocking, `CompletableFuture`, and Scala `Future`.
+- Optional effect bindings: **Cats Effect**, **fs2** and **Monix**, each in its own artifact so the
+  core stays dependency-free.
 
 > Unofficial. Not affiliated with TypeSafe AI.
 
 ## Install
 
 ```scala
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala" % "0.1.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala" % "0.2.0"
 ```
 
-Not on Maven Central yet; use `sbt publishLocal` until the first `v*` tag is pushed.
+Effect bindings are separate artifacts; add one only if you want it. Each depends on the core.
+
+| Artifact                          | Adds                                         | Pulls in                 |
+| --------------------------------- | -------------------------------------------- | ------------------------ |
+| `typesafe-sdk-scala`              | blocking, `CompletableFuture`, `Future`       | nothing                  |
+| `typesafe-sdk-scala-cats-effect`  | `TypeSafeClientF[F]` for any `Async[F]`       | cats-effect 3            |
+| `typesafe-sdk-scala-fs2`          | pipes for streams of states                   | fs2 3 (and the above)    |
+| `typesafe-sdk-scala-monix`        | `TypeSafeClientTask`                          | monix-eval 3             |
+
+```scala
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-cats-effect" % "0.2.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-fs2"         % "0.2.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-monix"       % "0.2.0"
+```
+
+Monix 3.x is built on Cats Effect 2, so the Monix and Cats Effect bindings cannot share a classpath:
+pick the one your application already uses.
+
+The effect bindings are new in 0.2.0; the core has been on Maven Central since 0.1.0.
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
 ## Quick start
@@ -123,8 +143,94 @@ val cf: CompletableFuture[SystemOneResponse] = client.systemOneAsync(state, ques
 The Scala `Future` fails with the typed `TypeSafeException`. The `CompletableFuture` follows the Java
 convention and wraps failures in `CompletionException` / `ExecutionException`.
 
-The retry loop is non-blocking (`CompletableFuture.delayedExecutor`), so wrapping the async variant in
-cats-effect or ZIO (`IO.fromCompletableFuture`, `ZIO.fromCompletionStage`) needs no extra thread.
+The retry loop is non-blocking (`CompletableFuture.delayedExecutor`), so no call ever parks a thread.
+Cancelling the `CompletableFuture` is honoured end to end: the HTTP exchange in flight is aborted and
+no further retry is attempted. (A Scala `Future` cannot be cancelled, so `systemOneFuture` runs to
+completion either way.)
+
+## Cats Effect
+
+```scala
+import cats.effect.{IO, IOApp}
+import typesafe.*
+import typesafe.catseffect.*
+
+object Main extends IOApp.Simple:
+  val urgent = Noul("The message conveys urgency").named("is_urgent")
+
+  def run = TypeSafeClientF.resource[IO]().use { client =>
+    client.systemOne("My payouts have failed for 3 days!", Questions.of(urgent))
+      .map(_(urgent).noul)
+      .flatMap(IO.println)
+  }
+```
+
+`TypeSafeClientF[F]` works for any `Async[F]`, not just `IO`. Calls are descriptions — nothing is sent
+until the `F` runs — failures are the SDK's own exceptions rather than `CompletionException` wrappers,
+and cancelling the fiber aborts the request and the retries with it.
+
+The retry loop here is native, not a wrapper: attempts are bounded with `F`'s `timeout`, backoff waits
+run on `F`'s scheduler (so a cancelled call stops waiting immediately, and no JDK timer thread is
+involved), and elapsed time against the retry budget comes from `F`'s clock. Only a single attempt is
+borrowed from the core client. What to send, what an answer means and *when* to retry stay in the
+shared, dependency-free core, so the two loops cannot drift apart — and because the wait is on `F`,
+the schedule is testable on virtual time:
+
+```scala
+TestControl.executeEmbed(client.systemOne(state, questions))   // 30s of backoff, 0s of wall clock
+```
+
+| Entry point                        | Gives                                                  |
+| ---------------------------------- | ------------------------------------------------------ |
+| `TypeSafeClientF.resource[F](cfg)` | `Resource[F, TypeSafeClientF[F]]`, closed on release    |
+| `TypeSafeClientF.withApiKey[F](k)` | the same with everything else defaulted                 |
+| `TypeSafeClientF.fromClient[F](c)` | lifts a client you own and keep closing yourself        |
+| `client.effect[F]`                 | the same, as syntax on a plain `TypeSafeClient`         |
+
+## fs2
+
+The API has no streaming endpoint; what streams is your own workload — a table, a queue, a file of
+tickets — run through System One with a bounded number of calls in flight.
+
+```scala
+import cats.effect.IO
+import fs2.Stream
+import typesafe.*
+import typesafe.fs2streams.*
+
+TypeSafeStream.resource[IO]().flatMap { client =>
+  Stream.emits(tickets).through(client.systemOnePipe(questions, maxConcurrent = 8))
+}.map(_(urgent).noul).compile.toVector
+```
+
+- `systemOnePipe` — answers in input order; the first failure fails the stream.
+- `systemOneUnorderedPipe` — answers as they arrive.
+- `systemOneAttemptPipe` — emits `(state, Either[Throwable, SystemOneResponse])`, so one bad state
+  does not sink a long run.
+
+## Monix
+
+```scala
+import monix.execution.Scheduler.Implicits.global
+import typesafe.*
+import typesafe.monixeffect.*
+
+val urgent = Noul("The message conveys urgency").named("is_urgent")
+
+val task = TypeSafeClientTask.use() { client =>
+  client.systemOne("My payouts have failed for 3 days!", Questions.of(urgent))
+}
+task.runToFuture.foreach(res => println(res(urgent).noul))
+```
+
+`use` builds a client, runs the body and closes it on success, failure or cancellation;
+`create` and `fromClient` are there when you want to manage the lifetime yourself. Cancelling the
+`Task` aborts the request in flight, like the Cats Effect binding.
+
+Unlike that binding, this one drives the core's own retry loop rather than a `Task`-native one: Monix
+3.x sits on Cats Effect 2 and is no longer developed, so a second loop to keep in step with the Python
+SDK's semantics would be maintenance without a return. Backoff therefore runs on the JDK's timer
+rather than on your `Scheduler`.
 
 ### Models
 
@@ -204,9 +310,14 @@ redacted; bodies are not.
 ## Development
 
 ```sh
-just test     # sbt test
+just test     # sbt test, across core and the effect modules
 just live     # smoke test against the real API (needs TYPESAFE_API_KEY)
 ```
+
+The build is `core` plus one module per effect system (`cats-effect`, `fs2`, `monix`); the effect
+modules reuse the core's mock-API test harness. The core exposes the call description, the decoders,
+a single-attempt `sendOnce` and the retry decisions as `private[typesafe]` internals, which is what a
+binding needs to run its own loop without re-deriving any semantics or widening the public API.
 
 ## License
 
