@@ -23,14 +23,15 @@ final class MockApi:
     def header(name: String): Option[String] = headers.collectFirst { case (k, v) if k.equalsIgnoreCase(name) => v }
 
   private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-  @volatile private var script: Int => Reply = _ => Reply(404)
+  @volatile private var script: (Received, Int) => Reply = (_, _) => Reply(404)
   val received = ConcurrentLinkedQueue[Received]()
 
   server.createContext("/", exchange => {
     val body = String(exchange.getRequestBody.readAllBytes(), UTF_8)
     val headers = exchange.getRequestHeaders.asScala.map((k, v) => k -> v.asScala.mkString(",")).toMap
-    received.add(Received(exchange.getRequestMethod, exchange.getRequestURI.getPath, headers, body))
-    val reply = script(received.size)
+    val request = Received(exchange.getRequestMethod, exchange.getRequestURI.getPath, headers, body)
+    received.add(request)
+    val reply = script(request, received.size)
     if reply.delay > Duration.Zero then Thread.sleep(reply.delay.toMillis)
     reply.headers.foreach((k, v) => exchange.getResponseHeaders.add(k, v))
     val bytes = reply.body.getBytes(UTF_8)
@@ -54,7 +55,12 @@ final class MockApi:
   /** `f(n)` answers the n-th request (1-based). */
   def respond(f: Int => Reply): Unit =
     received.clear()
-    script = f
+    script = (_, n) => f(n)
+
+  /** `f(request)` answers each request from its own content; safe when requests overlap. */
+  def respondTo(f: Received => Reply): Unit =
+    received.clear()
+    script = (r, _) => f(r)
 
   def requests: List[Received] = received.asScala.toList
   def stop(): Unit = server.stop(0)
@@ -233,6 +239,17 @@ class ClientSuite extends munit.FunSuite:
     api.respond(_ => Reply(401, """{"detail":"Invalid API key"}"""))
     val err = Await.ready(client().systemOneFuture("x", questions), 5.seconds).value.get.failed.get
     assertEquals(err.asInstanceOf[ApiException].kind, ApiErrorKind.Authentication)
+  }
+
+  test("cancelling the returned future aborts the call and stops retrying") {
+    api.respond(_ => Reply(503, delay = 200.millis)) // retryable: without cancellation this loops
+    val f = client().systemOneAsync("x", questions)
+    val deadline = System.nanoTime() + 5.seconds.toNanos
+    while api.requests.isEmpty && System.nanoTime() < deadline do Thread.sleep(5)
+    assert(f.cancel(true))
+    Thread.sleep(700)
+    assert(f.isCancelled)
+    assertEquals(api.requests.size, 1)
   }
 
   test("list models") {

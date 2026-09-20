@@ -4,6 +4,7 @@ import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse, HttpTimeoutException}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.util.concurrent.{CancellationException, CompletableFuture, CompletionException, ExecutionException, TimeUnit}
+import java.util.concurrent.atomic.AtomicReference
 import scala.collection.immutable.VectorMap
 import scala.concurrent.Future
 import scala.concurrent.duration.*
@@ -76,7 +77,7 @@ final class TypeSafeClient private (
     prepareSystemOne(state, questions, options) match
       case Left(e) => CompletableFuture.failedFuture(e)
       case Right(body) =>
-        execute("POST", Constants.SystemOnePath, Some(body), options).thenApply { (raw, meta, endpoint) =>
+        mapCancelable(execute("POST", Constants.SystemOnePath, Some(body), options)) { (raw, meta, endpoint) =>
           val (model, usage, answers) =
             decodeOrFail(raw, meta, endpoint)(Decode.systemOne(_, (name, tpe) => log.log(
               System.Logger.Level.WARNING, s"Ignoring answer '$name' with unrecognized type '$tpe'")))
@@ -93,7 +94,7 @@ final class TypeSafeClient private (
     def list(options: CallOptions = CallOptions.default): ListModelsResponse = await(listAsync(options))
 
     def listAsync(options: CallOptions = CallOptions.default): CompletableFuture[ListModelsResponse] =
-      execute("GET", Constants.ModelsPath, None, options).thenApply { (raw, meta, endpoint) =>
+      mapCancelable(execute("GET", Constants.ModelsPath, None, options)) { (raw, meta, endpoint) =>
         ListModelsResponse(decodeOrFail(raw, meta, endpoint)(Decode.models), meta)
       }
 
@@ -144,10 +145,22 @@ final class TypeSafeClient private (
           Constants.Protected(k.toLowerCase) || k.equalsIgnoreCase(Constants.RetryCountHeader))
         merged ++ protectedHeaders ++ body.map(_ => "Content-Type" -> "application/json")
       val started = System.nanoTime()
-      attemptLoop(1, policy, started, method, uri, endpoint, headers, body, attemptTimeout)
+      // The returned future owns the whole call: cancelling it aborts the exchange in flight and
+      // stops the retry loop, instead of merely detaching from work that keeps running.
+      val result = CompletableFuture[(Json, ResponseMeta, String)]()
+      val inFlight = AtomicReference[CompletableFuture[?]](null)
+      result.whenComplete { (_, err) =>
+        val current = inFlight.getAndSet(null)
+        if current != null && err.isInstanceOf[CancellationException] then current.cancel(true)
+      }
+      attemptLoop(result, inFlight, 1, policy, started, method, uri, endpoint, headers, body, attemptTimeout)
+      result
     catch case NonFatal(e) => CompletableFuture.failedFuture(e)
 
+  /** Runs one attempt and completes `result`, retrying in place until the policy gives up. */
   private def attemptLoop(
+      result: CompletableFuture[(Json, ResponseMeta, String)],
+      inFlight: AtomicReference[CompletableFuture[?]],
       attempt: Int,
       policy: RetryPolicy,
       started: Long,
@@ -157,27 +170,33 @@ final class TypeSafeClient private (
       headers: Map[String, String],
       body: Option[String],
       attemptTimeout: FiniteDuration
-  ): CompletableFuture[(Json, ResponseMeta, String)] =
-    val retries = attempt - 1
-    val h = if retries > 0 then headers + (Constants.RetryCountHeader -> retries.toString) else headers
-    if retries > 0 then log.log(System.Logger.Level.INFO, s"$endpoint retry $retries")
-    once(method, uri, endpoint, h, body, attemptTimeout, attempt)
-      .handle[CompletableFuture[(Json, ResponseMeta, String)]] { (ok, err) =>
-        if err == null then CompletableFuture.completedFuture(ok)
+  ): Unit =
+    if result.isDone then () // cancelled, or already answered
+    else
+      val retries = attempt - 1
+      val h = if retries > 0 then headers + (Constants.RetryCountHeader -> retries.toString) else headers
+      if retries > 0 then log.log(System.Logger.Level.INFO, s"$endpoint retry $retries")
+      val current = once(method, uri, endpoint, h, body, attemptTimeout, attempt)
+      inFlight.set(current)
+      if result.isCancelled then current.cancel(true) // cancelled while this attempt was starting
+      current.whenComplete { (ok, err) =>
+        if result.isDone then ()
+        else if err == null then result.complete(ok)
         else
           val e = unwrap(err)
-          if !policy.isRetryable(e) then CompletableFuture.failedFuture(e)
+          if !policy.isRetryable(e) then result.completeExceptionally(e)
           else
             val delay = policy.delay(attempt, e, scala.util.Random.nextDouble())
             val elapsed = (System.nanoTime() - started).nanos
-            if policy.shouldStop(attempt, elapsed, delay) then CompletableFuture.failedFuture(e)
+            if policy.shouldStop(attempt, elapsed, delay) then result.completeExceptionally(e)
             else
               val exec = CompletableFuture.delayedExecutor(delay.toNanos, TimeUnit.NANOSECONDS)
-              CompletableFuture
-                .supplyAsync(() => (), exec)
-                .thenCompose(_ => attemptLoop(attempt + 1, policy, started, method, uri, endpoint, headers, body, attemptTimeout))
+              exec.execute { () =>
+                try attemptLoop(result, inFlight, attempt + 1, policy, started, method, uri, endpoint, headers, body, attemptTimeout)
+                catch case NonFatal(t) => result.completeExceptionally(t)
+              }
       }
-      .thenCompose(identity)
+      ()
 
   private def once(
       method: String,
@@ -274,6 +293,20 @@ object TypeSafeClient:
 
   private def checkTimeout(t: FiniteDuration): Unit =
     if t <= Duration.Zero then throw ConfigException("timeout must be a positive duration.")
+
+  /** `thenApply`, but cancelling the mapped future cancels `src` too, which `thenApply` does not. */
+  private def mapCancelable[A, B](src: CompletableFuture[A])(f: A => B): CompletableFuture[B] =
+    val out = CompletableFuture[B]()
+    src.whenComplete { (a, err) =>
+      if err != null then out.completeExceptionally(unwrap(err))
+      else
+        try out.complete(f(a))
+        catch case NonFatal(t) => out.completeExceptionally(t)
+    }
+    out.whenComplete { (_, err) =>
+      if err.isInstanceOf[CancellationException] then src.cancel(true)
+    }
+    out
 
   private def toScala[T](f: CompletableFuture[T]): Future[T] =
     f.asScala.transform(identity, unwrap)(using scala.concurrent.ExecutionContext.parasitic)

@@ -31,4 +31,4 @@ jobs:
           cache: sbt
       - uses: sbt/setup-sbt@v1
       - if: ${{ env.TYPESAFE_API_KEY != '' }}
-        run: sbt "Test/runMain examples.triage"
+        run: sbt "core/Test/runMain examples.triage"

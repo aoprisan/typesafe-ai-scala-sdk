@@ -11,7 +11,7 @@ fmt:
 
 # live smoke test; needs TYPESAFE_API_KEY
 live:
-    sbt "Test/runMain examples.triage"
+    sbt "core/Test/runMain examples.triage"
 
 publish-local:
     sbt publishLocal
