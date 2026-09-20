@@ -1,6 +1,7 @@
 package typesafe.catseffect
 
 import cats.effect.kernel.{Async, Resource, Sync}
+import cats.syntax.all.*
 import java.util.concurrent.{CancellationException, CompletableFuture, CompletionException, ExecutionException}
 import typesafe.*
 
@@ -9,6 +10,10 @@ import typesafe.*
   * Every call is a description, not a running request: nothing leaves the JVM until the `F` is run,
   * and cancelling the fiber cancels the HTTP exchange. Failures are the SDK's own
   * [[typesafe.TypeSafeException]] types, never a `CompletionException` wrapper.
+  *
+  * The retry loop is this module's own ([[Retry]]), so attempts are timed and spaced on `F`'s clock
+  * and scheduler. Only a single attempt is borrowed from the core client; what to send, what an
+  * answer means and when to retry stay shared with it.
   *
   * {{{
   * import cats.effect.{IO, IOApp}
@@ -41,17 +46,26 @@ final class TypeSafeClientF[F[_]] private (val underlying: TypeSafeClient)(using
       questions: Questions,
       options: CallOptions = CallOptions.default
   ): F[SystemOneResponse] =
-    fromFuture(underlying.systemOneAsync(state, questions, options))
+    run(F.delay(underlying.systemOneCall(state, questions, options)))(underlying.decodeSystemOne)
 
   object models:
     /** The models available to this API key. */
     def list(options: CallOptions = CallOptions.default): F[ListModelsResponse] =
-      fromFuture(underlying.models.listAsync(options))
+      run(F.delay(underlying.modelsCall(options)))(underlying.decodeModels)
 
   /** Release the underlying HTTP client. [[TypeSafeClientF.resource]] does this for you. */
   def close: F[Unit] = F.delay(underlying.close())
 
-  /** Suspends the call, unwraps the JDK's exception wrappers and cancels the exchange on cancellation. */
+  /** One call: prepare it, run the attempts, decode what comes back. */
+  private def run[A](prepare: F[PreparedCall])(decode: (Json, ResponseMeta, String) => A): F[A] =
+    prepare.flatMap { call =>
+      val attempt = (n: Int) => fromFuture(underlying.sendOnce(call, n, boundAttempt = false))
+      Retry(call.policy, call.attemptTimeout, F.delay(scala.util.Random.nextDouble()))(attempt).flatMap {
+        (raw, meta, endpoint) => F.delay(decode(raw, meta, endpoint))
+      }
+    }
+
+  /** Suspends one attempt, unwraps the JDK's exception wrappers and cancels the exchange on cancellation. */
   private def fromFuture[A](start: => CompletableFuture[A]): F[A] =
     F.async[A] { cb =>
       F.delay {

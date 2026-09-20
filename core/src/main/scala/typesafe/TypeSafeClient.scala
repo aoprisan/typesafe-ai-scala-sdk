@@ -36,6 +36,22 @@ final case class CallOptions(
 object CallOptions:
   val default: CallOptions = CallOptions()
 
+/** One call, fully described and not yet sent: what the retry loops of the core and of the effect
+  * bindings all work from. Internal; its shape follows what those loops need.
+  */
+private[typesafe] final case class PreparedCall(
+    method: String,
+    uri: URI,
+    endpoint: String,
+    headers: Map[String, String],
+    body: Option[String],
+    policy: RetryPolicy,
+    attemptTimeout: FiniteDuration
+):
+  /** Headers for attempt `attempt` (1-based); a retry announces which one it is. */
+  def headersFor(attempt: Int): Map[String, String] =
+    if attempt <= 1 then headers else headers + (Constants.RetryCountHeader -> (attempt - 1).toString)
+
 /** TypeSafe System One client. Thread-safe; share one instance.
   *
   * {{{
@@ -74,15 +90,11 @@ final class TypeSafeClient private (
       questions: Questions,
       options: CallOptions = CallOptions.default
   ): CompletableFuture[SystemOneResponse] =
-    prepareSystemOne(state, questions, options) match
-      case Left(e) => CompletableFuture.failedFuture(e)
-      case Right(body) =>
-        mapCancelable(execute("POST", Constants.SystemOnePath, Some(body), options)) { (raw, meta, endpoint) =>
-          val (model, usage, answers) =
-            decodeOrFail(raw, meta, endpoint)(Decode.systemOne(_, (name, tpe) => log.log(
-              System.Logger.Level.WARNING, s"Ignoring answer '$name' with unrecognized type '$tpe'")))
-          SystemOneResponse(model, usage, answers, raw, meta)
-        }
+    try
+      mapCancelable(execute(systemOneCall(state, questions, options))) { (raw, meta, endpoint) =>
+        decodeSystemOne(raw, meta, endpoint)
+      }
+    catch case NonFatal(e) => CompletableFuture.failedFuture(e)
 
   /** Scala `Future` variant; fails with the typed [[TypeSafeException]], never a Java wrapper. */
   def systemOneFuture[S: ToJson](state: S, questions: Questions, options: CallOptions = CallOptions.default): Future[SystemOneResponse] =
@@ -94,9 +106,8 @@ final class TypeSafeClient private (
     def list(options: CallOptions = CallOptions.default): ListModelsResponse = await(listAsync(options))
 
     def listAsync(options: CallOptions = CallOptions.default): CompletableFuture[ListModelsResponse] =
-      mapCancelable(execute("GET", Constants.ModelsPath, None, options)) { (raw, meta, endpoint) =>
-        ListModelsResponse(decodeOrFail(raw, meta, endpoint)(Decode.models), meta)
-      }
+      try mapCancelable(execute(modelsCall(options))) { (raw, meta, endpoint) => decodeModels(raw, meta, endpoint) }
+      catch case NonFatal(e) => CompletableFuture.failedFuture(e)
 
     def listFuture(options: CallOptions = CallOptions.default): Future[ListModelsResponse] = toScala(listAsync(options))
 
@@ -127,56 +138,143 @@ final class TypeSafeClient private (
       case Decode.Failure(path, detail) =>
         throw ResponseValidationException(meta.status, path, detail, Some(raw), meta.headers, Some(endpoint))
 
-  private def execute(
-      method: String,
-      path: String,
-      body: Option[String],
-      options: CallOptions
+  // ---- the pieces an effect binding drives itself ---------------------------------------------
+  //
+  // A binding wants its own retry loop: its own clock, its own scheduler, its own cancellation. What
+  // it should not re-derive is what to send, what an answer means and when to retry, so the call
+  // description, the decoders and the retry decisions all live here and are shared with the
+  // `CompletableFuture` loop below. Behaviour can then only drift in one place.
+
+  /** Everything one System One call needs, with no request sent yet. Throws on invalid input. */
+  private[typesafe] def systemOneCall[S: ToJson](state: S, questions: Questions, options: CallOptions): PreparedCall =
+    prepareSystemOne(state, questions, options) match
+      case Left(e)     => throw e
+      case Right(body) => prepareCall("POST", Constants.SystemOnePath, Some(body), options)
+
+  /** Everything one list-models call needs, with no request sent yet. */
+  private[typesafe] def modelsCall(options: CallOptions): PreparedCall =
+    prepareCall("GET", Constants.ModelsPath, None, options)
+
+  private[typesafe] def decodeSystemOne(raw: Json, meta: ResponseMeta, endpoint: String): SystemOneResponse =
+    val (model, usage, answers) =
+      decodeOrFail(raw, meta, endpoint)(Decode.systemOne(_, (name, tpe) => log.log(
+        System.Logger.Level.WARNING, s"Ignoring answer '$name' with unrecognized type '$tpe'")))
+    SystemOneResponse(model, usage, answers, raw, meta)
+
+  private[typesafe] def decodeModels(raw: Json, meta: ResponseMeta, endpoint: String): ListModelsResponse =
+    ListModelsResponse(decodeOrFail(raw, meta, endpoint)(Decode.models), meta)
+
+  private def prepareCall(method: String, path: String, body: Option[String], options: CallOptions): PreparedCall =
+    val policy = options.retry.getOrElse(retry)
+    policy.validate()
+    val attemptTimeout = options.timeout.getOrElse(timeout)
+    checkTimeout(attemptTimeout)
+    val uri = URI.create(baseUrl + path)
+    val headers: Map[String, String] =
+      val merged = (defaultHeaders ++ options.headers).filterNot((k, _) =>
+        Constants.Protected(k.toLowerCase) || k.equalsIgnoreCase(Constants.RetryCountHeader))
+      merged ++ protectedHeaders ++ body.map(_ => "Content-Type" -> "application/json")
+    PreparedCall(method, uri, s"$method ${redact(uri)}", headers, body, policy, attemptTimeout)
+
+  /** One attempt, no retries; cancelling the returned future aborts the exchange.
+    *
+    * `boundAttempt` cancels the exchange at the attempt deadline, which the loop below relies on. A
+    * binding that bounds the attempt with its own `timeout` passes `false` and keeps that job.
+    */
+  private[typesafe] def sendOnce(
+      call: PreparedCall,
+      attempt: Int,
+      boundAttempt: Boolean = true
   ): CompletableFuture[(Json, ResponseMeta, String)] =
-    try
-      val policy = options.retry.getOrElse(retry)
-      policy.validate()
-      val attemptTimeout = options.timeout.getOrElse(timeout)
-      checkTimeout(attemptTimeout)
-      val uri = URI.create(baseUrl + path)
-      val endpoint = s"$method ${redact(uri)}"
-      val headers: Map[String, String] =
-        val merged = (defaultHeaders ++ options.headers).filterNot((k, _) =>
-          Constants.Protected(k.toLowerCase) || k.equalsIgnoreCase(Constants.RetryCountHeader))
-        merged ++ protectedHeaders ++ body.map(_ => "Content-Type" -> "application/json")
-      val started = System.nanoTime()
-      // The returned future owns the whole call: cancelling it aborts the exchange in flight and
-      // stops the retry loop, instead of merely detaching from work that keeps running.
-      val result = CompletableFuture[(Json, ResponseMeta, String)]()
-      val inFlight = AtomicReference[CompletableFuture[?]](null)
-      result.whenComplete { (_, err) =>
-        val current = inFlight.getAndSet(null)
-        if current != null && err.isInstanceOf[CancellationException] then current.cancel(true)
-      }
-      attemptLoop(result, inFlight, 1, policy, started, method, uri, endpoint, headers, body, attemptTimeout)
-      result
-    catch case NonFatal(e) => CompletableFuture.failedFuture(e)
+    if attempt > 1 then log.log(System.Logger.Level.INFO, s"${call.endpoint} retry ${attempt - 1}")
+    val headers = call.headersFor(attempt)
+    val publisher = call.body.fold(HttpRequest.BodyPublishers.noBody())(b => HttpRequest.BodyPublishers.ofString(b, UTF_8))
+    val builder = HttpRequest
+      .newBuilder(call.uri)
+      .method(call.method, publisher)
+      .timeout(java.time.Duration.ofNanos(call.attemptTimeout.toNanos))
+    headers.foreach((k, v) => builder.header(k, v))
+    val request = builder.build()
+    if log.isLoggable(System.Logger.Level.DEBUG) then
+      log.log(System.Logger.Level.DEBUG, s"${call.endpoint} -> headers=${redacted(headers)} body=${call.body.getOrElse("")}")
+    val t0 = System.nanoTime()
+    val sent = http.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
+    // `HttpRequest.timeout` only bounds the wait for response headers; a body that stalls afterwards
+    // would hang. Cancelling the exchange at the deadline covers the whole attempt.
+    if boundAttempt then
+      CompletableFuture.delayedExecutor(call.attemptTimeout.toNanos, TimeUnit.NANOSECONDS).execute(() => sent.cancel(true))
+    val out = CompletableFuture[(Json, ResponseMeta, String)]()
+    sent.whenComplete { (resp, err) =>
+      try out.complete(interpret(call, attempt, t0, resp, err))
+      catch case NonFatal(t) => out.completeExceptionally(t)
+    }
+    out.whenComplete { (_, err) =>
+      if err.isInstanceOf[CancellationException] then sent.cancel(true)
+    }
+    out
+
+  /** Turns one finished exchange into an answer or the typed failure it deserves. */
+  private def interpret(
+      call: PreparedCall,
+      attempt: Int,
+      startedAt: Long,
+      resp: HttpResponse[Array[Byte]],
+      err: Throwable
+  ): (Json, ResponseMeta, String) =
+    if err != null then
+      val cause = unwrap(err)
+      val mapped = cause match
+        case t: HttpTimeoutException  => TimeoutException(call.attemptTimeout, t)
+        case t: CancellationException => TimeoutException(call.attemptTimeout, t)
+        case e: TypeSafeException     => e
+        case other                    => ConnectionException(other)
+      log.log(System.Logger.Level.INFO, s"${call.endpoint} <- ${mapped.getClass.getSimpleName}")
+      throw mapped
+    val status = resp.statusCode()
+    val respHeaders = resp.headers().map().asScala.view.mapValues(_.asScala.toList).toMap
+    val bytes = resp.body()
+    val text = new String(bytes, UTF_8)
+    log.log(
+      System.Logger.Level.INFO,
+      f"${call.endpoint} <- $status in ${(System.nanoTime() - startedAt) / 1e6}%.0fms (request ${headerLookup(respHeaders, Constants.RequestIdHeader).getOrElse("-")})"
+    )
+    if log.isLoggable(System.Logger.Level.DEBUG) then
+      log.log(System.Logger.Level.DEBUG, s"${call.endpoint} <- headers=${redacted(respHeaders.view.mapValues(_.mkString(",")).toMap)} body=$text")
+    val lenient: Option[Json] =
+      if bytes.isEmpty then None else Some(Json.parse(text).getOrElse(Json.Str(text)))
+    if status < 200 || status > 299 then throw ApiException(status, lenient, respHeaders, Some(call.endpoint))
+    val meta = ResponseMeta(status, respHeaders, attempt)
+    Json.parse(text) match
+      case Right(json) => (json, meta, call.endpoint)
+      case Left(detail) =>
+        throw ResponseValidationException(status, "", detail, lenient, respHeaders, Some(call.endpoint))
+
+  // ---- the CompletableFuture retry loop -------------------------------------------------------
+
+  private def execute(call: PreparedCall): CompletableFuture[(Json, ResponseMeta, String)] =
+    val started = System.nanoTime()
+    // The returned future owns the whole call: cancelling it aborts the exchange in flight and
+    // stops the retry loop, instead of merely detaching from work that keeps running.
+    val result = CompletableFuture[(Json, ResponseMeta, String)]()
+    val inFlight = AtomicReference[CompletableFuture[?]](null)
+    result.whenComplete { (_, err) =>
+      val current = inFlight.getAndSet(null)
+      if current != null && err.isInstanceOf[CancellationException] then current.cancel(true)
+    }
+    attemptLoop(result, inFlight, 1, call, started)
+    result
 
   /** Runs one attempt and completes `result`, retrying in place until the policy gives up. */
   private def attemptLoop(
       result: CompletableFuture[(Json, ResponseMeta, String)],
       inFlight: AtomicReference[CompletableFuture[?]],
       attempt: Int,
-      policy: RetryPolicy,
-      started: Long,
-      method: String,
-      uri: URI,
-      endpoint: String,
-      headers: Map[String, String],
-      body: Option[String],
-      attemptTimeout: FiniteDuration
+      call: PreparedCall,
+      started: Long
   ): Unit =
     if result.isDone then () // cancelled, or already answered
     else
-      val retries = attempt - 1
-      val h = if retries > 0 then headers + (Constants.RetryCountHeader -> retries.toString) else headers
-      if retries > 0 then log.log(System.Logger.Level.INFO, s"$endpoint retry $retries")
-      val current = once(method, uri, endpoint, h, body, attemptTimeout, attempt)
+      val current = sendOnce(call, attempt)
       inFlight.set(current)
       if result.isCancelled then current.cancel(true) // cancelled while this attempt was starting
       current.whenComplete { (ok, err) =>
@@ -184,73 +282,19 @@ final class TypeSafeClient private (
         else if err == null then result.complete(ok)
         else
           val e = unwrap(err)
-          if !policy.isRetryable(e) then result.completeExceptionally(e)
+          if !call.policy.isRetryable(e) then result.completeExceptionally(e)
           else
-            val delay = policy.delay(attempt, e, scala.util.Random.nextDouble())
+            val delay = call.policy.delay(attempt, e, scala.util.Random.nextDouble())
             val elapsed = (System.nanoTime() - started).nanos
-            if policy.shouldStop(attempt, elapsed, delay) then result.completeExceptionally(e)
+            if call.policy.shouldStop(attempt, elapsed, delay) then result.completeExceptionally(e)
             else
               val exec = CompletableFuture.delayedExecutor(delay.toNanos, TimeUnit.NANOSECONDS)
               exec.execute { () =>
-                try attemptLoop(result, inFlight, attempt + 1, policy, started, method, uri, endpoint, headers, body, attemptTimeout)
+                try attemptLoop(result, inFlight, attempt + 1, call, started)
                 catch case NonFatal(t) => result.completeExceptionally(t)
               }
       }
       ()
-
-  private def once(
-      method: String,
-      uri: URI,
-      endpoint: String,
-      headers: Map[String, String],
-      body: Option[String],
-      attemptTimeout: FiniteDuration,
-      attempt: Int
-  ): CompletableFuture[(Json, ResponseMeta, String)] =
-    val publisher = body.fold(HttpRequest.BodyPublishers.noBody())(b => HttpRequest.BodyPublishers.ofString(b, UTF_8))
-    val builder = HttpRequest
-      .newBuilder(uri)
-      .method(method, publisher)
-      .timeout(java.time.Duration.ofNanos(attemptTimeout.toNanos))
-    headers.foreach((k, v) => builder.header(k, v))
-    val request = builder.build()
-    if log.isLoggable(System.Logger.Level.DEBUG) then
-      log.log(System.Logger.Level.DEBUG, s"$endpoint -> headers=${redacted(headers)} body=${body.getOrElse("")}")
-    val t0 = System.nanoTime()
-    val sent = http.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
-    // `HttpRequest.timeout` only bounds the wait for response headers; a body that stalls afterwards
-    // would hang. Cancelling the exchange at the deadline covers the whole attempt.
-    CompletableFuture.delayedExecutor(attemptTimeout.toNanos, TimeUnit.NANOSECONDS).execute(() => sent.cancel(true))
-    sent
-      .handle[(Json, ResponseMeta, String)] { (resp, err) =>
-        if err != null then
-          val cause = unwrap(err)
-          val mapped = cause match
-            case t: HttpTimeoutException  => TimeoutException(attemptTimeout, t)
-            case t: CancellationException => TimeoutException(attemptTimeout, t)
-            case e: TypeSafeException     => e
-            case other                    => ConnectionException(other)
-          log.log(System.Logger.Level.INFO, s"$endpoint <- ${mapped.getClass.getSimpleName}")
-          throw mapped
-        val status = resp.statusCode()
-        val respHeaders = resp.headers().map().asScala.view.mapValues(_.asScala.toList).toMap
-        val bytes = resp.body()
-        val text = new String(bytes, UTF_8)
-        log.log(
-          System.Logger.Level.INFO,
-          f"$endpoint <- $status in ${(System.nanoTime() - t0) / 1e6}%.0fms (request ${headerLookup(respHeaders, Constants.RequestIdHeader).getOrElse("-")})"
-        )
-        if log.isLoggable(System.Logger.Level.DEBUG) then
-          log.log(System.Logger.Level.DEBUG, s"$endpoint <- headers=${redacted(respHeaders.view.mapValues(_.mkString(",")).toMap)} body=$text")
-        val lenient: Option[Json] =
-          if bytes.isEmpty then None else Some(Json.parse(text).getOrElse(Json.Str(text)))
-        if status < 200 || status > 299 then throw ApiException(status, lenient, respHeaders, Some(endpoint))
-        val meta = ResponseMeta(status, respHeaders, attempt)
-        Json.parse(text) match
-          case Right(json) => (json, meta, endpoint)
-          case Left(detail) =>
-            throw ResponseValidationException(status, "", detail, lenient, respHeaders, Some(endpoint))
-      }
 
   private val protectedHeaders: Map[String, String] = Map(
     "Authorization" -> s"Bearer $apiKey",

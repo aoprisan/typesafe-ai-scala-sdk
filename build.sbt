@@ -61,8 +61,9 @@ lazy val catsEffect = project
     name        := "typesafe-sdk-scala-cats-effect",
     description := "Cats Effect binding for the TypeSafe AI System One client",
     libraryDependencies ++= Seq(
-      "org.typelevel" %% "cats-effect"      % catsEffectVersion,
-      "org.typelevel" %% "munit-cats-effect" % munitCatsEffectVersion % Test
+      "org.typelevel" %% "cats-effect"         % catsEffectVersion,
+      "org.typelevel" %% "cats-effect-testkit" % catsEffectVersion      % Test,
+      "org.typelevel" %% "munit-cats-effect"   % munitCatsEffectVersion % Test
     )
   )
 

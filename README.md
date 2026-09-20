@@ -169,6 +169,17 @@ object Main extends IOApp.Simple:
 until the `F` runs — failures are the SDK's own exceptions rather than `CompletionException` wrappers,
 and cancelling the fiber aborts the request and the retries with it.
 
+The retry loop here is native, not a wrapper: attempts are bounded with `F`'s `timeout`, backoff waits
+run on `F`'s scheduler (so a cancelled call stops waiting immediately, and no JDK timer thread is
+involved), and elapsed time against the retry budget comes from `F`'s clock. Only a single attempt is
+borrowed from the core client. What to send, what an answer means and *when* to retry stay in the
+shared, dependency-free core, so the two loops cannot drift apart — and because the wait is on `F`,
+the schedule is testable on virtual time:
+
+```scala
+TestControl.executeEmbed(client.systemOne(state, questions))   // 30s of backoff, 0s of wall clock
+```
+
 | Entry point                        | Gives                                                  |
 | ---------------------------------- | ------------------------------------------------------ |
 | `TypeSafeClientF.resource[F](cfg)` | `Resource[F, TypeSafeClientF[F]]`, closed on release    |
@@ -215,6 +226,11 @@ task.runToFuture.foreach(res => println(res(urgent).noul))
 `use` builds a client, runs the body and closes it on success, failure or cancellation;
 `create` and `fromClient` are there when you want to manage the lifetime yourself. Cancelling the
 `Task` aborts the request in flight, like the Cats Effect binding.
+
+Unlike that binding, this one drives the core's own retry loop rather than a `Task`-native one: Monix
+3.x sits on Cats Effect 2 and is no longer developed, so a second loop to keep in step with the Python
+SDK's semantics would be maintenance without a return. Backoff therefore runs on the JDK's timer
+rather than on your `Scheduler`.
 
 ### Models
 
@@ -299,7 +315,9 @@ just live     # smoke test against the real API (needs TYPESAFE_API_KEY)
 ```
 
 The build is `core` plus one module per effect system (`cats-effect`, `fs2`, `monix`); the effect
-modules reuse the core's mock-API test harness.
+modules reuse the core's mock-API test harness. The core exposes the call description, the decoders,
+a single-attempt `sendOnce` and the retry decisions as `private[typesafe]` internals, which is what a
+binding needs to run its own loop without re-deriving any semantics or widening the public API.
 
 ## License
 
