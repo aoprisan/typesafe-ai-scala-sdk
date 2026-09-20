@@ -84,7 +84,8 @@ res(urgent).isYes(0.8)      // Boolean
 res.get(urgent)             // Option[NoulAnswer]
 ```
 
-`sbt "Test/runMain examples.triage"` runs this against the live API.
+`sbt "examples/runMain examples.triage"` runs this: against the live API when `TYPESAFE_API_KEY` is
+set, and against a local fake server when it is not. See [examples/](examples/) for the rest.
 
 String keys work too: `Questions("is_urgent" -> Noul("…"))` with `res.noul("is_urgent")`.
 
@@ -373,6 +374,21 @@ Only `TypeSafeException` is caught on the way into an `Either`. `InterruptedExce
 winds a fork down, so turning it into a `Left` would quietly swallow a cancellation; it stays an
 exception, as do bugs.
 
+## Examples
+
+[examples/](examples/) holds a runnable sample per topic — triage, typed state, async, failures and
+retries, configuration, and one or two per effect binding. They need no API key: without
+`TYPESAFE_API_KEY` each one starts a local fake of the API and talks to that instead, so a fresh
+checkout can run all of them, and the same command runs against the real API once a key is set.
+
+```sh
+sbt "examples/runMain examples.triage"                      # core
+sbt "examplesCatsEffect/runMain examples.catseffect.Basics" # Cats Effect
+sbt "examplesFs2/runMain examples.streams.BatchOfTickets"   # fs2
+sbt "examplesMonix/runMain examples.monixtask.MonixBasics"  # Monix
+sbt "examplesOx/runMain examples.direct.oxScoped"           # Ox (JDK 21+)
+```
+
 ## Configuration
 
 ```scala
@@ -450,11 +466,13 @@ redacted; bodies are not.
 
 ```sh
 just test     # sbt test, across core and the effect modules
+just examples # run every sample in examples/ against its local fake API
 just live     # smoke test against the real API (needs TYPESAFE_API_KEY)
 ```
 
-The build is `core` plus one module per effect system (`cats-effect`, `fs2`, `monix`, `ox`); the
-effect modules reuse the core's mock-API test harness. `ox` is compiled at `-release 21` and is
+The build is `core` plus one module per effect system (`cats-effect`, `fs2`, `monix`, `ox`), and a
+matching sample module under [examples/](examples/) for each of them; the effect modules reuse the
+core's mock-API test harness, and the samples are aggregated so `sbt test` compiles them too. `ox` is compiled at `-release 21` and is
 dropped from the aggregate on an older JDK, so `just test` stays green on 17 — it just covers one
 module fewer. Releases are cut on 21 so that module is published too. The core exposes the call description, the decoders,
 a single-attempt `sendOnce` and the retry decisions as `private[typesafe]` internals, which is what a
