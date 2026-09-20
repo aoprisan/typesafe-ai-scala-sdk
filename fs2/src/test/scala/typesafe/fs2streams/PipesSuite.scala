@@ -93,3 +93,56 @@ class PipesSuite extends munit.CatsEffectSuite:
         }
       }
   }
+
+  test("the throttled pipe spaces the calls and still answers in input order") {
+    api.respondTo(r => Reply(200, answer(indexOf(r))))
+    val every = 80.millis
+    for
+      start <- IO.monotonic
+      got   <- nouls(
+                 Stream
+                   .emits(states)
+                   .through(client.systemOneThrottledPipe(questions, every = every, maxConcurrent = states.size))
+               )
+      end   <- IO.monotonic
+    yield
+      assertEquals(got, states.indices.map(i => s"0.$i".toDouble).toVector)
+      assertEquals(api.requests.size, states.size)
+      // `maxConcurrent` would have let all six go at once; the rate is what holds them apart.
+      val floor = every * (states.size - 1).toLong
+      assert(end - start >= floor, s"six calls one per $every should take at least $floor, took ${end - start}")
+  }
+
+  test("a burst is allowed through before the rate bites") {
+    api.respondTo(r => Reply(200, answer(indexOf(r))))
+    for
+      start <- IO.monotonic
+      _     <- nouls(
+                 Stream
+                   .emits(states.take(3))
+                   .through(client.systemOneThrottledPipe(questions, every = 1.second, burst = 3, maxConcurrent = 3))
+               )
+      end   <- IO.monotonic
+    yield assert(end - start < 1.second, s"a burst of three should not have waited, took ${end - start}")
+  }
+
+  test("the throttled attempt pipe keeps each state with its outcome") {
+    api.respondTo { r =>
+      val i = indexOf(r)
+      if i % 2 == 0 then Reply(200, answer(i)) else Reply(400, """{"error":{"message":"nope"}}""")
+    }
+    Stream
+      .emits(states)
+      .through(client.systemOneThrottledAttemptPipe(questions, every = 10.millis, maxConcurrent = 3))
+      .compile
+      .toVector
+      .map { got =>
+        assertEquals(got.map(_._1), states)
+        assertEquals(got.count(_._2.isRight), 3)
+        got.zipWithIndex.foreach {
+          case ((_, Right(res)), i) if i % 2 == 0 => assertEquals(res(urgent).noul, s"0.$i".toDouble)
+          case ((_, Left(e: ApiException)), i)    => assertEquals(e.status, 400, s"ticket $i")
+          case (other, i)                         => fail(s"unexpected outcome for ticket $i: $other")
+        }
+      }
+  }

@@ -85,3 +85,32 @@ class RetrySuite extends munit.CatsEffectSuite:
       assertEquals(out, Right(1))
     }
   }
+
+  test("the observer is told about every wait, and not about the failure that gives up") {
+    val policy = RetryPolicy(maxRetries = 2, backoffInitial = 1.second, backoffJitter = 0, budget = None)
+    TestControl
+      .executeEmbed(
+        for
+          seen   <- IO.ref(Vector.empty[(Int, FiniteDuration)])
+          observe = (n: Int, _: Throwable, d: FiniteDuration) => seen.update(_ :+ (n, d))
+          _      <- Retry(policy, 10.seconds, noJitter, Some(observe))(_ => IO.raiseError[Unit](connectionLost)).attempt
+          events <- seen.get
+        yield events
+      )
+      .map { events =>
+        // Three attempts, so two waits; the third failure is raised rather than announced.
+        assertEquals(events, Vector(1 -> 1.second, 2 -> 2.seconds))
+      }
+  }
+
+  test("an observer that fails is not allowed to fail the call") {
+    val policy = RetryPolicy(maxRetries = 1, backoffInitial = 1.second, backoffJitter = 0, budget = None)
+    val observe = (_: Int, _: Throwable, _: FiniteDuration) => IO.raiseError[Unit](RuntimeException("metrics are down"))
+    TestControl
+      .executeEmbed(
+        Retry(policy, 10.seconds, noJitter, Some(observe))(n =>
+          if n == 1 then IO.raiseError[Int](connectionLost) else IO.pure(n)
+        )
+      )
+      .map(attempt => assertEquals(attempt, 2))
+  }

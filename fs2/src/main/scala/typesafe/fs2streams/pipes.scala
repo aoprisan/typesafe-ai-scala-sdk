@@ -1,7 +1,9 @@
 package typesafe.fs2streams
 
 import cats.effect.kernel.Async
+import cats.syntax.all.*
 import fs2.{Pipe, Stream}
+import scala.concurrent.duration.FiniteDuration
 import typesafe.*
 import typesafe.catseffect.TypeSafeClientF
 
@@ -53,6 +55,50 @@ extension [F[_]](client: TypeSafeClientF[F])(using F: Async[F])
       options: CallOptions = CallOptions.default
   ): Pipe[F, S, (S, Either[Throwable, SystemOneResponse])] =
     _.parEvalMap(maxConcurrent)(state => F.map(F.attempt(client.systemOne(state, questions, options)))(state -> _))
+
+  /** As [[systemOnePipe]], but calls also start no faster than one every `every`.
+    *
+    * `maxConcurrent` bounds how many calls are *in flight*; this bounds how fast they are *started*,
+    * which is the shape a per-minute quota actually takes. Without it a burst of states walks
+    * straight into `429 Too Many Requests`, and the retry policy then spends the call's budget
+    * waiting out a limit the stream could have respected in the first place.
+    *
+    * `burst` is how many calls may go at once after an idle stretch; the default of 1 spaces every
+    * call evenly. The rate is per pipe, and a fresh bucket is taken each time the stream is run.
+    *
+    * {{{
+    * // 120 calls a minute, in bursts of up to 10
+    * Stream.emits(tickets).through(client.systemOneThrottledPipe(questions, every = 500.millis, burst = 10))
+    * }}}
+    */
+  def systemOneThrottledPipe[S: ToJson](
+      questions: Questions,
+      every: FiniteDuration,
+      burst: Int = 1,
+      maxConcurrent: Int = 4,
+      options: CallOptions = CallOptions.default
+  ): Pipe[F, S, SystemOneResponse] =
+    in =>
+      Stream.eval(Throttle[F](every, burst)).flatMap { throttle =>
+        in.parEvalMap(maxConcurrent)(state => throttle.acquire *> client.systemOne(state, questions, options))
+      }
+
+  /** [[systemOneThrottledPipe]] with [[systemOneAttemptPipe]]'s outcomes: the pairing you want for a
+    * long run against a rate-limited key, where one bad state should not cost you the whole batch.
+    */
+  def systemOneThrottledAttemptPipe[S: ToJson](
+      questions: Questions,
+      every: FiniteDuration,
+      burst: Int = 1,
+      maxConcurrent: Int = 4,
+      options: CallOptions = CallOptions.default
+  ): Pipe[F, S, (S, Either[Throwable, SystemOneResponse])] =
+    in =>
+      Stream.eval(Throttle[F](every, burst)).flatMap { throttle =>
+        in.parEvalMap(maxConcurrent) { state =>
+          F.map(F.attempt(throttle.acquire *> client.systemOne(state, questions, options)))(state -> _)
+        }
+      }
 
 object TypeSafeStream:
 

@@ -13,10 +13,10 @@ typed questions and get typed answers back.
   pull a circe/jsoniter/sttp version into your build.
 - **Same behaviour as the official Python SDK** (`typesafe-sdk` 0.6.0): environment variables,
   defaults, retry semantics, error classification and forward-compatible decoding.
-- Scala 3.3 LTS, JDK 17+.
+- Scala 3.3 LTS, JDK 17+ (the Ox binding alone needs 21).
 - Three flavours per call: blocking, `CompletableFuture`, and Scala `Future`.
-- Optional effect bindings: **Cats Effect**, **fs2** and **Monix**, each in its own artifact so the
-  core stays dependency-free.
+- Optional effect bindings: **Cats Effect**, **fs2**, **Monix** and **Ox**, each in its own artifact
+  so the core stays dependency-free.
 
 > Unofficial. Not affiliated with TypeSafe AI.
 
@@ -34,17 +34,23 @@ Effect bindings are separate artifacts; add one only if you want it. Each depend
 | `typesafe-sdk-scala-cats-effect`  | `TypeSafeClientF[F]` for any `Async[F]`       | cats-effect 3            |
 | `typesafe-sdk-scala-fs2`          | pipes for streams of states                   | fs2 3 (and the above)    |
 | `typesafe-sdk-scala-monix`        | `TypeSafeClientTask`                          | monix-eval 3             |
+| `typesafe-sdk-scala-ox`           | direct style: scopes, `Flow`, `Either`        | ox 1 (JDK 21+)           |
 
 ```scala
 libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-cats-effect" % "0.2.0"
 libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-fs2"         % "0.2.0"
 libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-monix"       % "0.2.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-ox"          % "0.2.0"
 ```
 
 Monix 3.x is built on Cats Effect 2, so the Monix and Cats Effect bindings cannot share a classpath:
 pick the one your application already uses.
 
-The effect bindings are new in 0.2.0; the core has been on Maven Central since 0.1.0.
+Ox needs a Java 21 runtime, so that module is compiled at `-release 21` and is left out of the
+build entirely on an older JDK — everything else stays on 17.
+
+All four effect bindings are new in 0.2.0, along with the `Either`-returning calls, the retry
+observer and the throttled fs2 pipes; the core has been on Maven Central since 0.1.0.
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
 ## Quick start
@@ -187,6 +193,50 @@ TestControl.executeEmbed(client.systemOne(state, questions))   // 30s of backoff
 | `TypeSafeClientF.fromClient[F](c)` | lifts a client you own and keep closing yourself        |
 | `client.effect[F]`                 | the same, as syntax on a plain `TypeSafeClient`         |
 
+### Failures in the value
+
+`F[A]` has no typed error channel, but [`TypeSafeException`](#errors) is sealed, so the SDK can hand
+its own failures back as a `Left` the compiler checks:
+
+```scala
+client.systemOneEither(state, questions).flatMap {
+  case Right(res)                => IO.println(res(urgent).noul)
+  case Left(e: ApiException)     => IO.println(s"api said ${e.status}")
+  case Left(e: TimeoutException) => IO.println(s"gave up after ${e.timeout}")
+  case Left(e)                   => IO.raiseError(e)
+}
+```
+
+Drop a case and the match fails to compile, which is the part `.attempt` on a `Throwable` cannot give
+you. `models.listEither()` is the same for the models call.
+
+Only the SDK's own failures move: a bug in a `ToJson` instance stays in the error channel, and a
+cancelled fiber is still cancelled rather than a `Left`.
+
+### Watching the retries
+
+The SDK carries no logging or metrics dependency, so `withOnRetry` is the seam for log4cats, otel4s
+or a bare counter:
+
+```scala
+TypeSafeClientF.resource[IO]().map(_.withOnRetry { ev =>
+  logger.warn(s"${ev.endpoint} attempt ${ev.attempt} failed, waiting ${ev.delay}", ev.error)
+})
+```
+
+A `RetryEvent` carries the `endpoint`, the 1-based `attempt` that failed, the `delay` before the next
+one and the `error`. It fires only when another attempt really is coming — the failure that exhausts
+the policy is raised, not announced — and the observer cannot change the outcome: its result is
+discarded and its own failure is swallowed, because a broken counter should not fail a request that
+was about to succeed.
+
+`withRandom` replaces the ambient `ThreadLocalRandom` that feeds the backoff jitter, so a seeded
+`cats.effect.std.Random` plus `TestControl` pins a jittered schedule exactly instead of to a range:
+
+```scala
+Random.scalaUtilRandomSeedInt[IO](42).map(client.withRandom)
+```
+
 ## fs2
 
 The API has no streaming endpoint; what streams is your own workload — a table, a queue, a file of
@@ -207,6 +257,25 @@ TypeSafeStream.resource[IO]().flatMap { client =>
 - `systemOneUnorderedPipe` — answers as they arrive.
 - `systemOneAttemptPipe` — emits `(state, Either[Throwable, SystemOneResponse])`, so one bad state
   does not sink a long run.
+
+### Staying inside a quota
+
+`maxConcurrent` bounds how many calls are *in flight*; a per-minute quota is a bound on how fast they
+are *started*. Without one, a burst walks straight into `429 Too Many Requests` and the retry policy
+then spends the call's budget waiting out a limit the stream could have respected in the first place.
+fs2 has no token bucket of its own, so the module brings one:
+
+```scala
+Stream.emits(tickets).through(
+  client.systemOneThrottledPipe(questions, every = 500.millis, burst = 10, maxConcurrent = 8)
+) // 120 calls a minute, in bursts of up to 10
+```
+
+`every` is the steady spacing between call starts and `burst` how many may go at once after an idle
+stretch (the default of 1 spaces every call evenly). `systemOneThrottledAttemptPipe` is the same with
+`systemOneAttemptPipe`'s outcomes — the pairing you want for a long run against a rate-limited key.
+
+The bucket is per pipe and a fresh one is taken each time the stream runs.
 
 ## Monix
 
@@ -234,9 +303,75 @@ rather than on your `Scheduler`.
 
 ### Models
 
+
 ```scala
 client.models.list().models.foreach(m => println(s"${m.name} (${m.releaseDate})"))
 ```
+
+## Ox
+
+[Ox](https://ox.softwaremill.com) is direct style on JDK 21 virtual threads, so there is no wrapper
+type here and that is the point: blocking is cheap on a virtual thread, so the core's own blocking
+API *is* the Ox API. `client.systemOne(...)` inside a `fork` parks a virtual thread and nothing else,
+and the core already honours interruption — it cancels the HTTP exchange and re-arms the interrupt
+flag — which is exactly what a supervised scope needs when it winds a fork down.
+
+```scala
+import ox.*
+import typesafe.*
+import typesafe.oxdirect.*
+
+val urgent = Noul("The message conveys urgency").named("is_urgent")
+
+supervised {
+  val client = TypeSafeOx.inScope()          // closed when the scope ends
+  val a = fork { client.systemOne(ticketA, Questions.of(urgent)) }
+  val b = fork { client.systemOne(ticketB, Questions.of(urgent)) }
+  (a.join(), b.join())
+}
+```
+
+What the module adds is the rest: a lifetime tied to a scope, the sealed failures as `Either`, and
+`Flow` operators for a batch.
+
+```scala
+client.systemOneEither(ticket, questions)   // Either[TypeSafeException, SystemOneResponse]
+client.modelsEither()                       // the same for the models call
+```
+
+which drops straight into an `either` block:
+
+```scala
+import ox.either.*
+
+val summary: Either[TypeSafeException, String] = either:
+  val res = client.systemOneEither(ticket, questions).ok()
+  s"urgency ${res(urgent).noul}"
+```
+
+`Flow` gets the same three shapes as the fs2 pipes, with the failure side typed rather than
+`Throwable`:
+
+```scala
+supervised {
+  val client = TypeSafeOx.inScope()
+  Flow.fromIterable(tickets)
+    .throttle(120, 1.minute)                              // Ox's own, no module code needed
+    .systemOnePar(client, questions, parallelism = 8)     // input order
+    .runToList()
+}
+```
+
+- `systemOnePar` — answers in input order; the first failure fails the flow.
+- `systemOneParUnordered` — answers as they arrive.
+- `systemOneParEither` — emits `(state, Either[TypeSafeException, SystemOneResponse])`.
+
+Rate limiting stays Ox's job: `Flow#throttle` is built in, so unlike the fs2 module there is no
+bucket to ship.
+
+Only `TypeSafeException` is caught on the way into an `Either`. `InterruptedException` is how a scope
+winds a fork down, so turning it into a `Left` would quietly swallow a cancellation; it stays an
+exception, as do bugs.
 
 ## Configuration
 
@@ -295,6 +430,10 @@ catch
 Error messages from FastAPI-style validation bodies are flattened, e.g.
 `questions.frustration.criteria: List should have at least 2 items`.
 
+Because the hierarchy is sealed, the Cats Effect and Ox bindings can also hand these back as a value
+— `systemOneEither` returns `Either[TypeSafeException, SystemOneResponse]` — and the compiler then
+checks the match for you.
+
 ## Forward compatibility
 
 - Answer types this version does not know are skipped (logged at WARNING) and remain in `response.raw`.
@@ -314,8 +453,10 @@ just test     # sbt test, across core and the effect modules
 just live     # smoke test against the real API (needs TYPESAFE_API_KEY)
 ```
 
-The build is `core` plus one module per effect system (`cats-effect`, `fs2`, `monix`); the effect
-modules reuse the core's mock-API test harness. The core exposes the call description, the decoders,
+The build is `core` plus one module per effect system (`cats-effect`, `fs2`, `monix`, `ox`); the
+effect modules reuse the core's mock-API test harness. `ox` is compiled at `-release 21` and is
+dropped from the aggregate on an older JDK, so `just test` stays green on 17 — it just covers one
+module fewer. Releases are cut on 21 so that module is published too. The core exposes the call description, the decoders,
 a single-attempt `sendOnce` and the retry decisions as `private[typesafe]` internals, which is what a
 binding needs to run its own loop without re-deriving any semantics or widening the public API.
 
