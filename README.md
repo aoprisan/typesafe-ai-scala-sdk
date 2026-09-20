@@ -23,7 +23,7 @@ typed questions and get typed answers back.
 ## Install
 
 ```scala
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala" % "0.1.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala" % "0.2.0"
 ```
 
 Effect bindings are separate artifacts; add one only if you want it. Each depends on the core.
@@ -36,15 +36,15 @@ Effect bindings are separate artifacts; add one only if you want it. Each depend
 | `typesafe-sdk-scala-monix`        | `TypeSafeClientTask`                          | monix-eval 3             |
 
 ```scala
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-cats-effect" % "0.1.0"
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-fs2"         % "0.1.0"
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-monix"       % "0.1.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-cats-effect" % "0.2.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-fs2"         % "0.2.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-monix"       % "0.2.0"
 ```
 
 Monix 3.x is built on Cats Effect 2, so the Monix and Cats Effect bindings cannot share a classpath:
 pick the one your application already uses.
 
-Not on Maven Central yet; use `sbt publishLocal` until the first `v*` tag is pushed.
+The effect bindings are new in 0.2.0; the core has been on Maven Central since 0.1.0.
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
 ## Quick start
