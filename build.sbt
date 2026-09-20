@@ -48,8 +48,8 @@ lazy val runningJdk = sys.props.getOrElse("java.specification.version", baseRele
 // `ox` is left out of the aggregate on a JDK that could not run it, so `sbt test` stays green for a
 // contributor on 17 instead of failing on a module they cannot build.
 lazy val aggregated: Seq[ProjectReference] =
-  Seq[ProjectReference](core, catsEffect, fs2, monix) ++
-    (if (runningJdk >= oxRelease.toInt) Seq[ProjectReference](ox) else Nil)
+  Seq[ProjectReference](core, catsEffect, fs2, monix, examples, examplesCatsEffect, examplesFs2, examplesMonix) ++
+    (if (runningJdk >= oxRelease.toInt) Seq[ProjectReference](ox, examplesOx) else Nil)
 
 lazy val root = project
   .in(file("."))
@@ -119,3 +119,46 @@ lazy val ox = project
     // rather than a NoSuchMethodError on someone's first call.
     libraryDependencies += "com.softwaremill.ox" %% "core" % oxVersion
   )
+
+// ---- examples ---------------------------------------------------------------------------------
+// The samples under `examples/`, one module per effect system so that Monix (Cats Effect 2) never
+// shares a classpath with the Cats Effect 3 ones. Nothing here is published, but everything here is
+// aggregated: `sbt test` compiles the samples, so a change to the API that they document cannot be
+// merged while they still describe the old one.
+
+def exampleSettings(release: String = baseRelease) = commonSettings(release) ++ Seq(
+  publish / skip := true,
+  run / fork     := true,
+  // The samples print arrows and box characters; don't let a POSIX locale turn those into `?`.
+  run / javaOptions ++= Seq("-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8")
+)
+
+lazy val examples = project
+  .in(file("examples/core"))
+  .dependsOn(core)
+  .settings(exampleSettings())
+  .settings(name := "typesafe-sdk-scala-examples")
+
+lazy val examplesCatsEffect = project
+  .in(file("examples/cats-effect"))
+  .dependsOn(examples, catsEffect)
+  .settings(exampleSettings())
+  .settings(name := "typesafe-sdk-scala-examples-cats-effect")
+
+lazy val examplesFs2 = project
+  .in(file("examples/fs2"))
+  .dependsOn(examples, fs2)
+  .settings(exampleSettings())
+  .settings(name := "typesafe-sdk-scala-examples-fs2")
+
+lazy val examplesMonix = project
+  .in(file("examples/monix"))
+  .dependsOn(examples, monix)
+  .settings(exampleSettings())
+  .settings(name := "typesafe-sdk-scala-examples-monix")
+
+lazy val examplesOx = project
+  .in(file("examples/ox"))
+  .dependsOn(examples, ox)
+  .settings(exampleSettings(oxRelease))
+  .settings(name := "typesafe-sdk-scala-examples-ox")
