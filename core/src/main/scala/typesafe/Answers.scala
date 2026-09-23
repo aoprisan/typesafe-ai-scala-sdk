@@ -133,7 +133,7 @@ private[typesafe] object Decode:
   def models(raw: Json): Vector[ModelMetadata] =
     val top = obj(raw, "")
     field(top, "models", "").asArray.getOrElse(fail("models", "expected an array")).zipWithIndex.map { (m, i) =>
-      val p = s"models.$i"
+      val p = s"models[$i]"
       val o = obj(m, p)
       ModelMetadata(
         str(field(o, "name", p), s"$p.name"),

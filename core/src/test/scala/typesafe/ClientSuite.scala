@@ -142,6 +142,23 @@ class ClientSuite extends munit.FunSuite:
     assertEquals(r.header("x-typesafe-retry-count"), None)
   }
 
+  test("goes through an AI gateway: a path of its own, and a key of its own") {
+    api.respond(_ => Reply(200, okBody))
+    val gateway = TypeSafeClient(
+      ClientConfig(
+        apiKey = Some("sk-test"),
+        baseUrl = Some(api.url + "/v1/acct/gw/typesafe/"),
+        headers = Map("cf-aig-authorization" -> "Bearer gw-key"),
+        env = _ => None
+      )
+    )
+    gateway.systemOne("x", questions)
+    val r = api.requests.head
+    assertEquals(r.path, "/v1/acct/gw/typesafe/v1/systemone")
+    assertEquals(r.header("cf-aig-authorization"), Some("Bearer gw-key"))
+    assertEquals(r.header("authorization"), Some("Bearer sk-test"))
+  }
+
   test("429 with retry-after-ms is retried, then succeeds") {
     api.respond {
       case 1 => Reply(429, """{"error":{"message":"slow down"}}""", Map("retry-after-ms" -> "20"))

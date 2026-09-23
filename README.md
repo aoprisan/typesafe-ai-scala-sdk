@@ -11,7 +11,7 @@ typed questions and get typed answers back.
 
 - **No runtime dependencies.** It uses the JDK `HttpClient` and a small internal JSON AST, so it won't
   pull a circe/jsoniter/sttp version into your build.
-- **Same behaviour as the official Python SDK** (`typesafe-sdk` 0.6.0): environment variables,
+- **Same behaviour as the official Python SDK** (`typesafe-sdk` 0.7.1): environment variables,
   defaults, retry semantics, error classification and forward-compatible decoding.
 - Scala 3.3 LTS, JDK 17+ (the Ox binding alone needs 21).
 - Three flavours per call: blocking, `CompletableFuture`, and Scala `Future`.
@@ -23,7 +23,7 @@ typed questions and get typed answers back.
 ## Install
 
 ```scala
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala" % "0.3.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala" % "0.4.0"
 ```
 
 Effect bindings are separate artifacts; add one only if you want it. Each depends on the core.
@@ -37,10 +37,10 @@ Effect bindings are separate artifacts; add one only if you want it. Each depend
 | `typesafe-sdk-scala-ox`           | direct style: scopes, `Flow`, `Either`        | ox 1 (JDK 21+)           |
 
 ```scala
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-cats-effect" % "0.3.0"
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-fs2"         % "0.3.0"
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-monix"       % "0.3.0"
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-ox"          % "0.3.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-cats-effect" % "0.4.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-fs2"         % "0.4.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-monix"       % "0.4.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-ox"          % "0.4.0"
 ```
 
 Monix 3.x is built on Cats Effect 2, so the Monix and Cats Effect bindings cannot share a classpath:

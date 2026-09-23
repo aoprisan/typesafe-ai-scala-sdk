@@ -10,6 +10,10 @@ import typesafe.rubric.{choice as choiceA, named as namedA, noul as noulA, optio
   */
 private[typesafe] object RubricMacros:
 
+  /** The API's limits, from the primitives docs: a score has 2 to 10 levels, a choice up to 255 options. */
+  private val MaxScoreLevels   = 10
+  private val MaxChoiceOptions = 255
+
   /** `isUrgent` → `is_urgent`, `NeedsHuman` → `needs_human`, `HTTPError` → `http_error`. */
   def snakeCase(name: String): String =
     val sb = new StringBuilder
@@ -93,6 +97,9 @@ private[typesafe] object RubricMacros:
         else if annot.tpe <:< TypeRepr.of[scoreA] then
           if varargCount(annot).contains(0) then
             fail(s"$where.${param.name}: a @score needs its levels, lowest first: @score(\"…\", \"Calm\", \"Angry\").", pos)
+          varargCount(annot).filter(n => n == 1 || n > MaxScoreLevels).foreach { n =>
+            fail(s"$where.${param.name}: a @score takes 2 to $MaxScoreLevels levels, this one has $n.", pos)
+          }
           val q = '{ RubricSupport.scoreQuestion(${ annot.asExprOf[scoreA] }) }
           if tpe =:= TypeRepr.of[ScoreAnswer] then q -> '{ (r: SystemOneResponse) => RubricSupport.score(r, $nameExpr) }
           else
@@ -101,6 +108,9 @@ private[typesafe] object RubricMacros:
         else
           val a = annot.asExprOf[choiceA]
           val labels = varargCount(annot)
+          labels.filter(_ > MaxChoiceOptions).foreach { n =>
+            fail(s"$where.${param.name}: a @choice takes at most $MaxChoiceOptions options, this one has $n.", pos)
+          }
           if tpe =:= TypeRepr.of[ChoiceAnswer] || tpe =:= TypeRepr.of[String] then
             if labels.contains(0) then
               fail(
@@ -147,6 +157,8 @@ private[typesafe] object RubricMacros:
       report.errorAndAbort(s"$where: a RubricChoice is derived for an enum whose cases are the options.")
     val cases = owner.children
     if cases.isEmpty then report.errorAndAbort(s"$where has no cases, so it offers no options.")
+    if cases.size > MaxChoiceOptions then
+      report.errorAndAbort(s"$where: a choice takes at most $MaxChoiceOptions options, this enum has ${cases.size}.")
 
     val entries = cases.map { child =>
       val value =

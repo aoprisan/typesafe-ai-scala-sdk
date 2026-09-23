@@ -96,6 +96,12 @@ class UnitSuite extends munit.FunSuite:
     assertEquals(answers("department").asInstanceOf[ChoiceAnswer].ranked.head, "technical" -> 0.84)
   }
 
+  test("a bad model entry is named by its index, as the Python SDK names it") {
+    val j = Json.parse("""{"models":[{"name":"a","description":"","release_date":""},{}]}""").toOption.get
+    val path = try { Decode.models(j); "" } catch case Decode.Failure(p, _) => p
+    assertEquals(path, "models[1].name")
+  }
+
   private def pathOf(j: Json): String =
     try { Decode.systemOne(j, (_, _) => ()); "" } catch case Decode.Failure(p, _) => p
 
@@ -152,6 +158,17 @@ class UnitSuite extends munit.FunSuite:
     intercept[ConfigException](p.copy(backoffJitter = 1.5).validate())
   }
 
+  test("a connection error with no message names its cause instead of saying null") {
+    assertEquals(ConnectionException(new java.net.ConnectException()).getMessage, "Connection error: java.net.ConnectException")
+    assertEquals(ConnectionException(new java.io.IOException("reset")).getMessage, "Connection error: reset")
+  }
+
+  test("a gateway's key is masked in logs as well as the API's") {
+    val secret = List("Authorization", "cookie", "cf-aig-authorization", "x-portkey-api-key", "x-gateway-token", "x-client-secret")
+    for name <- secret do assert(Constants.isSecret(name), name)
+    for name <- List("content-type", "x-typesafe-request-id", "retry-after") do assert(!Constants.isSecret(name), name)
+  }
+
   test("client configuration") {
     val noEnv: String => Option[String] = _ => None
     intercept[ConfigException](TypeSafeClient(ClientConfig(env = noEnv)))
@@ -159,6 +176,10 @@ class UnitSuite extends munit.FunSuite:
     intercept[ConfigException](TypeSafeClient(ClientConfig(apiKey = Some("k"), baseUrl = Some("not a url"), env = noEnv)))
     intercept[ConfigException](TypeSafeClient(ClientConfig(apiKey = Some("k"), baseUrl = Some("/v1"), env = noEnv)))
     intercept[ConfigException](TypeSafeClient(ClientConfig(apiKey = Some("k"), baseUrl = Some("ftp://h"), env = noEnv)))
+    assertEquals(TypeSafeClient(ClientConfig(apiKey = Some("  sk-test\n"), env = noEnv)).defaultModel, "jev-latest")
+    for bad <- List("", "   ", "sk test", "sk\ttest", "sk-\u007f", "sk-é") do
+      val e = intercept[ConfigException](TypeSafeClient(ClientConfig(apiKey = Some(bad), env = noEnv)))
+      assert(e.getMessage.contains(if bad.trim.isEmpty then "No API key" else "printable ASCII"), bad)
     val env = Map("TYPESAFE_API_KEY" -> "  envkey ", "TYPESAFE_BASE_URL" -> "http://h:1///", "TYPESAFE_DEFAULT_MODEL" -> "   ")
     val c = TypeSafeClient(ClientConfig(env = env.get))
     assertEquals(c.baseUrl, "http://h:1")
