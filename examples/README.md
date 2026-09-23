@@ -27,7 +27,7 @@ always use the fake, because the real API cannot be asked to misbehave on cue.
 | `examples/runMain examples.asyncCalls`          | blocking vs `Future` vs `CompletableFuture`, and what cancelling one does                  |
 | `examples/runMain examples.errorsAndRetries`    | every failure the SDK can raise, retries, `Retry-After`, a custom `retryIf`                |
 | `examples/runMain examples.configuration`       | `ClientConfig`, per-call `CallOptions`, `RawQuestion`, `extraBody`, listing models         |
-| `examples/runMain examples.rubrics`             | a case class as the rubric: `derives Rubric`, an enum as a choice, `client.ask[Triage]`    |
+| `examples/runMain examples.rubrics`             | a case class as the rubric: `derives Rubric`, an enum as a choice, `client.ask[TicketTriage]`|
 | `examples/runMain examples.recordAndReplay`     | recording responses, replaying them with no key or network, and a `ReplayMissException`    |
 
 ### Cats Effect (`examplesCatsEffect`)

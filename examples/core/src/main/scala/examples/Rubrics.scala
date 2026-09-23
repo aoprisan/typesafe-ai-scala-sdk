@@ -14,7 +14,7 @@ import typesafe.rubric.*
   * sbt "examples/runMain examples.rubrics"
   * }}}
   */
-case class Triage(
+case class TicketTriage(
     @noul(
       "The message conveys urgency",
       yes = "A deadline, a threat to leave, or \"ASAP\"",
@@ -37,11 +37,11 @@ enum Team derives RubricChoice:
 
 @main def rubrics(): Unit = Demo.run() { config =>
   // What goes on the wire, derived from the case class: look at it before paying for it.
-  println(Rubric[Triage].questions.toJson.render)
+  println(Rubric[TicketTriage].questions.toJson.render)
 
   val client = TypeSafeClient(config)
   try
-    val triage = client.ask[Triage]("The payout failed again, third time this month. I'm done waiting. Refund me.")
+    val triage = client.ask[TicketTriage]("The payout failed again, third time this month. I'm done waiting. Refund me.")
 
     println(f"department  ${triage.department.value} (confidence ${triage.department.confidence}%.2f)")
     println(f"frustration ${triage.frustration.score}%.2f")

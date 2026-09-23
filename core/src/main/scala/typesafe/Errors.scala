@@ -13,7 +13,7 @@ object Constants:
   val DefaultBaseUrl = "https://api.typesafe.ai"
   val DefaultModel = "jev-latest"
   val DefaultTimeout: FiniteDuration = 10.seconds
-  val Version = "0.2.0"
+  val Version = "0.3.0"
   val SdkName = "typesafe-sdk-scala"
 
   private[typesafe] val SystemOnePath = "/v1/systemone"
