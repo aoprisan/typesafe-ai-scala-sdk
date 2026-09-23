@@ -126,6 +126,58 @@ enum Dept:
 res(department).as(Dept.valueOf)   // Either[Throwable, Dept]
 ```
 
+Or let the enum be the options: an enum that `derives RubricChoice` (below) offers its cases as the
+labels, and `RubricChoice[Dept].choice("Which team")` builds the `Choice`.
+
+### Rubrics as case classes
+
+A case class can be the whole rubric. Each field is a question, asked under the snake_case of its name
+(`isUrgent` → `is_urgent`), and the field's type is what the answer decodes into:
+
+```scala
+import typesafe.*
+import typesafe.rubric.*
+
+case class Triage(
+  @noul("The message conveys urgency", yes = "A deadline or ASAP", no = "Routine")
+  isUrgent: NoulAnswer,
+  @choice("Which team should handle this")
+  department: ChoiceOf[Department],        // the enum, plus the distribution it was picked from
+  @score("How frustrated the customer appears", "Calm", "Frustrated but civil", "Very angry")
+  frustration: ScoreAnswer,
+  @noul("The customer asks for their money back") @named("wants_refund")
+  refund: Double                           // just the probability of "yes"
+) derives Rubric
+
+enum Department derives RubricChoice:      // offered as billing, technical, needs_human
+  @option("Payment or subscription issues") case Billing
+  @option("Bugs or integration problems") case Technical
+  case NeedsHuman
+
+val triage: Triage = client.ask[Triage]("The payout failed again. Refund me.")
+triage.department.value     // Department.Billing
+triage.refund               // Double
+Rubric[Triage].questions    // what goes on the wire
+```
+
+| Annotation                        | Field type                                                          |
+| --------------------------------- | ------------------------------------------------------------------- |
+| `@noul("…", yes = "…", no = "…")` | `NoulAnswer`, or `Double` for the probability; `yes`/`no` optional   |
+| `@choice("…")`                    | an enum deriving `RubricChoice`, or `ChoiceOf` one                  |
+| `@choice("…", "label", …)`        | `ChoiceAnswer`, or `String` for the selected label                  |
+| `@score("…", "level", …)`         | `ScoreAnswer`, or `Double` for the score; levels lowest first        |
+| `@named("…")`                     | a question name (or, on an enum case, a label) other than the snake_case one |
+
+Mistakes are compile errors rather than a `None` at runtime: an answer read as the wrong type, a field
+with no question annotation, a score without levels, a `String` choice without labels, two fields asked
+under one name, an enum case that carries data. A response the case class cannot hold — an answer
+missing, of another type, or a label the enum does not have — is a `ResponseValidationException` whose
+`fieldPath` names it (`answers.department.choice`).
+
+`askAsync` and `askFuture` are the other two flavours; the Cats Effect and Monix clients have `ask`,
+Cats Effect and Ox `askEither`. `Rubric[Triage].fromResponse(res)` decodes a response you already
+have, and both traits can be implemented by hand.
+
 ### Per-call options
 
 ```scala
@@ -399,12 +451,41 @@ TypeSafeClient(ClientConfig(
   timeout    = 10.seconds,               // per attempt
   retry      = RetryPolicy(),
   headers    = Map.empty,
-  httpClient = None                      // your own java.net.http.HttpClient (proxy, executor, TLS)
+  httpClient = None,                     // your own java.net.http.HttpClient (proxy, executor, TLS)
+  record     = None,                     // else TYPESAFE_RECORD: a directory to record responses into
+  replay     = None                      // else TYPESAFE_REPLAY: a directory to replay responses from
 ))
 ```
 
 Explicit values win; blank environment values are ignored. Call `client.close()` when done (a no-op on
 JDK 17, where `HttpClient` isn't closeable).
+
+## Recording and replaying
+
+Tests that call the API are slow, cost money and need a key. Record their answers once and replay them
+after that:
+
+```sh
+TYPESAFE_RECORD=src/test/resources/cassettes sbt test   # live: each successful response is kept
+TYPESAFE_REPLAY=src/test/resources/cassettes sbt test   # offline: no network, no API key
+```
+
+```scala
+val client = TypeSafeClient(ClientConfig(replay = Some(Path.of("src/test/resources/cassettes"))))
+```
+
+- A response is kept at `<dir>/<key>.json`, where the key is the SHA-256 of the exact request body:
+  state, model, questions in order, and any `extraBody` fields. Change any of them and it is a
+  different recording. `Cassette.key(state, model, questions)` computes it.
+- A request with no recording fails with `ReplayMissException` (`key`, `path`). A replaying client
+  never falls back to the network, so a test cannot quietly start spending.
+- A recording that no longer decodes is a `ResponseValidationException`, like a bad live body.
+  Replayed responses report `meta.attempts == 0` and no headers; `models.list()` is not recorded, and
+  a replaying client refuses it with `ConfigException`.
+- Setting both is a `ConfigException`. Only System One calls that succeed and decode are recorded.
+- The effect bindings record and replay too: they take the same `ClientConfig`.
+- The files are the ones the Rust SDK records and `jev eval --cache` keeps — the same key, and the
+  body as compact JSON in server order — so a cassette directory can be shared between them.
 
 ## Retries
 
@@ -428,12 +509,13 @@ All failures extend the sealed `TypeSafeException`:
 
 | Exception                     | When                                                                    |
 | ----------------------------- | ----------------------------------------------------------------------- |
-| `ConfigException`             | missing API key, invalid base URL, non-positive timeout, invalid retry policy |
+| `ConfigException`             | missing API key, invalid base URL, non-positive timeout, invalid retry policy, record and replay both set |
 | `InvalidRequestException`     | no questions, empty score criteria, malformed raw question, unencodable state |
 | `ApiException`                | non-2xx after retries; `kind`, `detail`, `body`, `requestId`, `retryAfter` |
 | `ConnectionException`         | no response (DNS, connect, reset, read)                                 |
 | `TimeoutException`            | an attempt exceeded its timeout                                         |
 | `ResponseValidationException` | 2xx body missing required data; `fieldPath` like `answers.tone.confidence` |
+| `ReplayMissException`         | replaying, and this request was never recorded; `key`, `path`            |
 
 ```scala
 try client.systemOne(state, questions)

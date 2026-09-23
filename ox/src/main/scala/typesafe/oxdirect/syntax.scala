@@ -39,6 +39,14 @@ extension (client: TypeSafeClient)
   def modelsEither(options: CallOptions = CallOptions.default): Either[TypeSafeException, ListModelsResponse] =
     narrow(client.models.list(options))
 
+  /** As `client.ask[R]`, with the SDK's failures in the value: `client.askEither[Triage](state)`. */
+  def askEither[R](using rubric: Rubric[R]): AskingEither[R] = AskingEither(client, rubric)
+
+/** A pending [[askEither]]: give it the state. */
+final class AskingEither[R] private[oxdirect] (client: TypeSafeClient, rubric: Rubric[R]):
+  def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): Either[TypeSafeException, R] =
+    narrow(client.ask(using rubric)(state, options))
+
 /** [[ox.flow.Flow]] operators that ask the same questions of every element of a batch of states.
   *
   * The API has no streaming endpoint; what flows here is your own workload — a table, a queue, a

@@ -79,6 +79,23 @@ final class TypeSafeClientF[F[_]] private (
   ): F[Either[TypeSafeException, SystemOneResponse]] =
     narrow(systemOne(state, questions, options))
 
+  /** Ask the questions of a [[typesafe.Rubric]] about `state` and decode the answers into it:
+    * `client.ask[Triage](state)`. A response the rubric cannot hold fails with
+    * [[typesafe.ResponseValidationException]].
+    */
+  def ask[R](using rubric: Rubric[R]): Asking[R] = Asking(rubric)
+
+  /** As [[ask]], with the SDK's failures in the value. See [[systemOneEither]]. */
+  def askEither[R](using rubric: Rubric[R]): AskingEither[R] = AskingEither(rubric)
+
+  final class Asking[R] private[TypeSafeClientF] (rubric: Rubric[R]):
+    def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): F[R] =
+      systemOne(state, rubric.questions, options).flatMap(res => F.delay(rubric.fromResponse(res)))
+
+  final class AskingEither[R] private[TypeSafeClientF] (rubric: Rubric[R]):
+    def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): F[Either[TypeSafeException, R]] =
+      narrow(Asking(rubric)(state, options))
+
   object models:
     /** The models available to this API key. */
     def list(options: CallOptions = CallOptions.default): F[ListModelsResponse] =

@@ -33,6 +33,7 @@ object TypedFailures extends IOApp.Simple:
       case Left(e: ResponseValidationException) => IO.println(s"  decode    ${e.fieldPath}: ${e.detail}")
       case Left(e: InvalidRequestException)  => IO.println(s"  local     ${e.getMessage}")
       case Left(e: ConfigException)          => IO.println(s"  config    ${e.getMessage}")
+      case Left(e: ReplayMissException)      => IO.println(s"  replay    nothing recorded at ${e.path}")
 
   /** One client per fake, each closed after its turn. */
   private def against(label: String, api: FakeApi)(call: TypeSafeClientF[IO] => IO[Unit]): IO[Unit] =

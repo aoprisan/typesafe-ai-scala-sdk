@@ -119,6 +119,7 @@ class TypeSafeOxSuite extends munit.FunSuite:
         case Left(_: ConnectionException)         => "connection"
         case Left(_: TimeoutException)            => "timeout"
         case Left(_: ResponseValidationException) => "response"
+        case Left(_: ReplayMissException)         => "replay"
     }
     assertEquals(described, "api")
   }

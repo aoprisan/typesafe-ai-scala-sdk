@@ -3,6 +3,7 @@ package typesafe
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse, HttpTimeoutException}
 import java.nio.charset.StandardCharsets.UTF_8
+import java.nio.file.{Files, Path}
 import java.util.concurrent.{CancellationException, CompletableFuture, CompletionException, ExecutionException, TimeUnit}
 import java.util.concurrent.atomic.AtomicReference
 import scala.collection.immutable.VectorMap
@@ -12,7 +13,12 @@ import scala.jdk.CollectionConverters.*
 import scala.jdk.FutureConverters.*
 import scala.util.control.NonFatal
 
-/** Client settings. Explicit values win over environment variables; blank env values are ignored. */
+/** Client settings. Explicit values win over environment variables; blank env values are ignored.
+  *
+  * `record` (else `TYPESAFE_RECORD`) keeps each successful System One response under a directory,
+  * and `replay` (else `TYPESAFE_REPLAY`) answers from one without the network or an API key; see
+  * [[Cassette]].
+  */
 final case class ClientConfig(
     apiKey: Option[String] = None,
     baseUrl: Option[String] = None,
@@ -21,7 +27,9 @@ final case class ClientConfig(
     retry: RetryPolicy = RetryPolicy(),
     headers: Map[String, String] = Map.empty,
     httpClient: Option[HttpClient] = None,
-    env: String => Option[String] = sys.env.get
+    env: String => Option[String] = sys.env.get,
+    record: Option[Path] = None,
+    replay: Option[Path] = None
 )
 
 /** Per-call overrides. `extraBody` fields are shallow-merged last over `state`/`model`/`questions`. */
@@ -46,7 +54,8 @@ private[typesafe] final case class PreparedCall(
     headers: Map[String, String],
     body: Option[String],
     policy: RetryPolicy,
-    attemptTimeout: FiniteDuration
+    attemptTimeout: FiniteDuration,
+    cassetteKey: Option[String] = None
 ):
   /** Headers for attempt `attempt` (1-based); a retry announces which one it is. */
   def headersFor(attempt: Int): Map[String, String] =
@@ -69,8 +78,9 @@ final class TypeSafeClient private (
     timeout: FiniteDuration,
     retry: RetryPolicy,
     defaultHeaders: Map[String, String],
-    apiKey: String,
-    http: HttpClient
+    apiKey: Option[String],
+    http: HttpClient,
+    cassette: Option[TypeSafeClient.CassetteMode]
 ):
   import TypeSafeClient.*
 
@@ -99,6 +109,32 @@ final class TypeSafeClient private (
   /** Scala `Future` variant; fails with the typed [[TypeSafeException]], never a Java wrapper. */
   def systemOneFuture[S: ToJson](state: S, questions: Questions, options: CallOptions = CallOptions.default): Future[SystemOneResponse] =
     toScala(systemOneAsync(state, questions, options))
+
+  // ---- Rubrics ------------------------------------------------------------------------------
+
+  /** Ask the questions of a [[Rubric]] about `state` and decode the answers into it:
+    * `client.ask[Triage]("The payout failed again.")`. Throws [[TypeSafeException]].
+    */
+  def ask[R](using rubric: Rubric[R]): Asking[R] = Asking(rubric)
+
+  /** [[ask]], returning a Java `CompletableFuture`. */
+  def askAsync[R](using rubric: Rubric[R]): AskingAsync[R] = AskingAsync(rubric)
+
+  /** [[ask]], returning a Scala `Future` that fails with the typed [[TypeSafeException]]. */
+  def askFuture[R](using rubric: Rubric[R]): AskingFuture[R] = AskingFuture(rubric)
+
+  final class Asking[R] private[TypeSafeClient] (rubric: Rubric[R]):
+    def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): R =
+      rubric.fromResponse(systemOne(state, rubric.questions, options))
+
+  final class AskingAsync[R] private[TypeSafeClient] (rubric: Rubric[R]):
+    def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): CompletableFuture[R] =
+      try mapCancelable(systemOneAsync(state, rubric.questions, options))(rubric.fromResponse)
+      catch case NonFatal(e) => CompletableFuture.failedFuture(e)
+
+  final class AskingFuture[R] private[TypeSafeClient] (rubric: Rubric[R]):
+    def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): Future[R] =
+      toScala(AskingAsync(rubric)(state, options))
 
   // ---- Models ------------------------------------------------------------------------------
 
@@ -148,12 +184,17 @@ final class TypeSafeClient private (
   /** Everything one System One call needs, with no request sent yet. Throws on invalid input. */
   private[typesafe] def systemOneCall[S: ToJson](state: S, questions: Questions, options: CallOptions): PreparedCall =
     prepareSystemOne(state, questions, options) match
-      case Left(e)     => throw e
-      case Right(body) => prepareCall("POST", Constants.SystemOnePath, Some(body), options)
+      case Left(e) => throw e
+      case Right(body) =>
+        val call = prepareCall("POST", Constants.SystemOnePath, Some(body), options)
+        if cassette.isEmpty then call else call.copy(cassetteKey = Some(Cassette.keyOf(body)))
 
   /** Everything one list-models call needs, with no request sent yet. */
   private[typesafe] def modelsCall(options: CallOptions): PreparedCall =
-    prepareCall("GET", Constants.ModelsPath, None, options)
+    cassette match
+      case Some(CassetteMode.Replay(dir)) =>
+        throw ConfigException(s"Listing models is not recorded, so a client replaying from $dir cannot answer it.")
+      case _ => prepareCall("GET", Constants.ModelsPath, None, options)
 
   private[typesafe] def decodeSystemOne(raw: Json, meta: ResponseMeta, endpoint: String): SystemOneResponse =
     val (model, usage, answers) =
@@ -185,6 +226,25 @@ final class TypeSafeClient private (
       call: PreparedCall,
       attempt: Int,
       boundAttempt: Boolean = true
+  ): CompletableFuture[(Json, ResponseMeta, String)] =
+    (cassette, call.cassetteKey) match
+      case (Some(CassetteMode.Replay(dir)), Some(key)) =>
+        try CompletableFuture.completedFuture(replay(dir, key))
+        catch case NonFatal(e) => CompletableFuture.failedFuture(e)
+      case (Some(CassetteMode.Record(dir)), Some(key)) =>
+        val sent = send(call, attempt, boundAttempt)
+        sent.thenApply { ok =>
+          record(dir, key, ok._1)
+          ok
+        }.whenComplete { (_, err) =>
+          if err.isInstanceOf[CancellationException] then sent.cancel(true)
+        }
+      case _ => send(call, attempt, boundAttempt)
+
+  private def send(
+      call: PreparedCall,
+      attempt: Int,
+      boundAttempt: Boolean
   ): CompletableFuture[(Json, ResponseMeta, String)] =
     if attempt > 1 then log.log(System.Logger.Level.INFO, s"${call.endpoint} retry ${attempt - 1}")
     val headers = call.headersFor(attempt)
@@ -249,6 +309,32 @@ final class TypeSafeClient private (
       case Left(detail) =>
         throw ResponseValidationException(status, "", detail, lenient, respHeaders, Some(call.endpoint))
 
+  /** The recorded response for `key`, in the shape a live call returns: no headers, no attempts. */
+  private def replay(dir: Path, key: String): (Json, ResponseMeta, String) =
+    val path = Cassette.path(dir, key)
+    val text =
+      try Files.readString(path, UTF_8)
+      catch case NonFatal(_) => throw ReplayMissException(key, path)
+    log.log(System.Logger.Level.DEBUG, s"<- replayed $path")
+    val endpoint = s"replay $path"
+    Json.parse(text) match
+      case Right(json) => (json, ResponseMeta(200, Map.empty, 0), endpoint)
+      case Left(detail) =>
+        throw ResponseValidationException(200, "", detail, Some(Json.Str(text)), Map.empty, Some(endpoint))
+
+  /** Keep a response that decodes; one that does not is left for the caller to fail on. */
+  private def record(dir: Path, key: String, body: Json): Unit =
+    val decodes =
+      try
+        Decode.systemOne(body, (_, _) => ())
+        true
+      catch case NonFatal(_) => false
+    if decodes then
+      try Cassette.write(dir, key, body)
+      catch
+        case NonFatal(e) =>
+          log.log(System.Logger.Level.WARNING, s"Could not record the response for $key in $dir: ${e.getMessage}")
+
   // ---- the CompletableFuture retry loop -------------------------------------------------------
 
   private def execute(call: PreparedCall): CompletableFuture[(Json, ResponseMeta, String)] =
@@ -296,8 +382,7 @@ final class TypeSafeClient private (
       }
       ()
 
-  private val protectedHeaders: Map[String, String] = Map(
-    "Authorization" -> s"Bearer $apiKey",
+  private val protectedHeaders: Map[String, String] = apiKey.map(k => "Authorization" -> s"Bearer $k").toMap ++ Map(
     "Accept" -> "application/json",
     "User-Agent" -> s"${Constants.SdkName}/${Constants.Version}",
     Constants.SdkHeader -> s"${Constants.SdkName}/${Constants.Version}",
@@ -308,14 +393,34 @@ final class TypeSafeClient private (
 object TypeSafeClient:
   private val log = System.getLogger("typesafe")
 
+  /** Where System One responses are recorded to or replayed from. */
+  private[typesafe] enum CassetteMode:
+    case Record(dir: Path)
+    case Replay(dir: Path)
+
   /** A client configured from `config` (defaults: everything from the environment). */
   def apply(config: ClientConfig = ClientConfig()): TypeSafeClient =
     def resolve(explicit: Option[String], env: String): Option[String] =
       explicit.orElse(config.env(env).map(_.trim).filter(_.nonEmpty))
-    val key = resolve(config.apiKey, Constants.ApiKeyEnv).getOrElse(
+    def resolvePath(explicit: Option[Path], env: String): Option[Path] =
+      explicit.orElse(resolve(None, env).map(Path.of(_)))
+    val cassette = (resolvePath(config.record, Constants.RecordEnv), resolvePath(config.replay, Constants.ReplayEnv)) match
+      case (Some(_), Some(_)) =>
+        throw ConfigException(
+          s"Both record and replay are set; a client does one or the other. Unset ${Constants.RecordEnv} or " +
+            s"${Constants.ReplayEnv}, or drop one of the settings."
+        )
+      case (Some(dir), None) =>
+        try Files.createDirectories(dir)
+        catch case NonFatal(e) => throw ConfigException(s"Cannot record into $dir: ${e.getMessage}.")
+        Some(CassetteMode.Record(dir))
+      case (None, Some(dir)) => Some(CassetteMode.Replay(dir))
+      case (None, None)      => None
+    // A replaying client never sends anything, so it has no use for a key.
+    val key = resolve(config.apiKey, Constants.ApiKeyEnv)
+    if key.isEmpty && !cassette.exists(_.isInstanceOf[CassetteMode.Replay]) then
       throw ConfigException(s"No API key was provided. Pass apiKey or set the ${Constants.ApiKeyEnv} environment variable.")
-    )
-    if key.exists(c => c == '\r' || c == '\n') then throw ConfigException("The API key contains invalid characters.")
+    if key.exists(_.exists(c => c == '\r' || c == '\n')) then throw ConfigException("The API key contains invalid characters.")
     checkTimeout(config.timeout)
     config.retry.validate()
     val baseUrl = resolve(config.baseUrl, Constants.BaseUrlEnv).getOrElse(Constants.DefaultBaseUrl).reverse.dropWhile(_ == '/').reverse
@@ -329,6 +434,7 @@ object TypeSafeClient:
       retry = config.retry,
       defaultHeaders = config.headers,
       apiKey = key,
+      cassette = cassette,
       http = config.httpClient.getOrElse(HttpClient.newBuilder().connectTimeout(java.time.Duration.ofNanos(config.timeout.toNanos)).build())
     )
 
