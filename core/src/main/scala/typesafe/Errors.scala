@@ -8,6 +8,8 @@ object Constants:
   val ApiKeyEnv = "TYPESAFE_API_KEY"
   val BaseUrlEnv = "TYPESAFE_BASE_URL"
   val DefaultModelEnv = "TYPESAFE_DEFAULT_MODEL"
+  val RecordEnv = "TYPESAFE_RECORD"
+  val ReplayEnv = "TYPESAFE_REPLAY"
   val DefaultBaseUrl = "https://api.typesafe.ai"
   val DefaultModel = "jev-latest"
   val DefaultTimeout: FiniteDuration = 10.seconds
@@ -30,7 +32,9 @@ object Constants:
 sealed abstract class TypeSafeException(message: String, cause: Throwable = null)
     extends RuntimeException(message, cause)
 
-/** Missing API key, invalid timeout or invalid retry policy. */
+/** Missing API key, invalid timeout or retry policy, record and replay both set, or listing models
+  * while replaying.
+  */
 final class ConfigException(message: String) extends TypeSafeException(message)
 
 /** Rejected locally before sending (no questions, empty score criteria, malformed raw question, unencodable state). */
@@ -130,6 +134,13 @@ final class ResponseValidationException(
     val headers: Map[String, List[String]],
     val endpoint: Option[String]
 ) extends TypeSafeException(suffix(endpoint, s"$status Invalid response data at '$fieldPath': $detail", headers))
+
+/** The client is replaying and this request was never recorded. Nothing was sent: a replaying
+  * client does not fall back to the network. Record it first (`TYPESAFE_RECORD=<dir>`); see
+  * [[Cassette]].
+  */
+final class ReplayMissException(val key: String, val path: java.nio.file.Path)
+    extends TypeSafeException(s"No recording for this request: $path does not exist (replaying, so nothing was sent).")
 
 private[typesafe] object RetryAfter:
   def parse(headers: Map[String, List[String]]): Option[FiniteDuration] =

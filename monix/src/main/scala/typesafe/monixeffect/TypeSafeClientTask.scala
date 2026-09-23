@@ -42,6 +42,15 @@ final class TypeSafeClientTask private (val underlying: TypeSafeClient):
   ): Task[SystemOneResponse] =
     fromFuture(underlying.systemOneAsync(state, questions, options))
 
+  /** Ask the questions of a [[typesafe.Rubric]] about `state` and decode the answers into it:
+    * `client.ask[Triage](state)`.
+    */
+  def ask[R](using rubric: Rubric[R]): Asking[R] = Asking(rubric)
+
+  final class Asking[R] private[TypeSafeClientTask] (rubric: Rubric[R]):
+    def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): Task[R] =
+      fromFuture(underlying.askAsync(using rubric)(state, options))
+
   object models:
     /** The models available to this API key. */
     def list(options: CallOptions = CallOptions.default): Task[ListModelsResponse] =

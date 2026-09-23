@@ -5,6 +5,7 @@ import cats.effect.kernel.Outcome
 import cats.effect.std.Random
 import scala.concurrent.duration.*
 import typesafe.*
+import typesafe.rubric.noul
 
 class TypeSafeClientFSuite extends munit.CatsEffectSuite:
   private val api = MockApi()
@@ -34,6 +35,25 @@ class TypeSafeClientFSuite extends munit.CatsEffectSuite:
     IO(assertEquals(api.requests.size, 0)) *>
       call.map(res => assertEquals(res(urgent).noul, 0.9)) *>
       IO(assertEquals(api.requests.size, 1))
+  }
+
+  test("record, then replay through this module's own retry loop, and ask for a rubric") {
+    val dir = java.nio.file.Files.createTempDirectory("typesafe-ce-cassette")
+    api.respond(_ => Reply(200, okBody))
+    val recording = TypeSafeClient(config.copy(record = Some(dir))).effect[IO]
+    val replaying = TypeSafeClient(config.copy(apiKey = None, replay = Some(dir))).effect[IO]
+    for
+      live   <- recording.ask[Urgency]("Stripe keeps failing.")
+      _      <- IO(api.respond(_ => Reply(500)))
+      again  <- replaying.ask[Urgency]("Stripe keeps failing.")
+      miss   <- replaying.askEither[Urgency]("Something new.")
+      models <- replaying.models.listEither()
+    yield
+      assertEquals(live, Urgency(0.9))
+      assertEquals(again, live)
+      assertEquals(api.requests.size, 0)
+      assert(miss.left.exists(_.isInstanceOf[ReplayMissException]), miss)
+      assert(models.left.exists(_.isInstanceOf[ConfigException]), models)
   }
 
   test("models.list") {
@@ -125,6 +145,7 @@ class TypeSafeClientFSuite extends munit.CatsEffectSuite:
         case Left(_: ConnectionException)         => "connection"
         case Left(_: TimeoutException)            => "timeout"
         case Left(_: ResponseValidationException) => "response"
+        case Left(_: ReplayMissException)         => "replay"
       assertEquals(described, "api")
     }
   }
@@ -173,3 +194,5 @@ class TypeSafeClientFSuite extends munit.CatsEffectSuite:
       // ambient ThreadLocalRandom these two runs would not line up to the nanosecond.
       assertEquals(first, second)
   }
+
+case class Urgency(@noul("The message conveys urgency") isUrgent: Double) derives Rubric
