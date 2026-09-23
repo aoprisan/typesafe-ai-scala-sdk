@@ -158,6 +158,11 @@ class UnitSuite extends munit.FunSuite:
     intercept[ConfigException](p.copy(backoffJitter = 1.5).validate())
   }
 
+  test("a connection error with no message names its cause instead of saying null") {
+    assertEquals(ConnectionException(new java.net.ConnectException()).getMessage, "Connection error: java.net.ConnectException")
+    assertEquals(ConnectionException(new java.io.IOException("reset")).getMessage, "Connection error: reset")
+  }
+
   test("client configuration") {
     val noEnv: String => Option[String] = _ => None
     intercept[ConfigException](TypeSafeClient(ClientConfig(env = noEnv)))

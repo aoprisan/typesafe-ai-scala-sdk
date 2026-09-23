@@ -119,7 +119,7 @@ object ApiException:
 
 /** The request never produced a response (DNS, connect, reset, read failure). */
 final class ConnectionException(cause: Throwable)
-    extends TypeSafeException(s"Connection error: ${cause.getMessage}", cause)
+    extends TypeSafeException(s"Connection error: ${Option(cause.getMessage).getOrElse(cause.getClass.getName)}", cause)
 
 /** The request exceeded its per-attempt timeout. */
 final class TimeoutException(val timeout: FiniteDuration, cause: Throwable = null)
