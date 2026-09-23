@@ -23,7 +23,7 @@ typed questions and get typed answers back.
 ## Install
 
 ```scala
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala" % "0.2.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala" % "0.3.0"
 ```
 
 Effect bindings are separate artifacts; add one only if you want it. Each depends on the core.
@@ -37,10 +37,10 @@ Effect bindings are separate artifacts; add one only if you want it. Each depend
 | `typesafe-sdk-scala-ox`           | direct style: scopes, `Flow`, `Either`        | ox 1 (JDK 21+)           |
 
 ```scala
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-cats-effect" % "0.2.0"
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-fs2"         % "0.2.0"
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-monix"       % "0.2.0"
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-ox"          % "0.2.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-cats-effect" % "0.3.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-fs2"         % "0.3.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-monix"       % "0.3.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-ox"          % "0.3.0"
 ```
 
 Monix 3.x is built on Cats Effect 2, so the Monix and Cats Effect bindings cannot share a classpath:
@@ -52,6 +52,8 @@ build entirely on an older JDK — everything else stays on 17.
 All four effect bindings are new in 0.2.0, along with the `Either`-returning calls, the retry
 observer and the throttled fs2 pipes; the core has been on Maven Central since 0.1.0.
 See [RELEASING.md](RELEASING.md) for how releases are cut.
+
+0.3.0 adds recording and replaying responses and rubrics derived from a case class (both below).
 
 ## Quick start
 
