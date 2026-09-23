@@ -28,6 +28,13 @@ object Constants:
   private[typesafe] val Protected = Set("authorization", "accept", "user-agent", "x-typesafe-sdk", "x-typesafe-runtime", "content-type")
   private[typesafe] val Secret = Set("authorization", "proxy-authorization", "x-api-key", "api-key", "cookie", "set-cookie")
 
+  /** A credential-bearing header: the known names, plus anything that says it carries one, as an AI
+    * gateway's own key does (`cf-aig-authorization`, `x-portkey-api-key`, `x-gateway-token`).
+    */
+  private[typesafe] def isSecret(name: String): Boolean =
+    val lower = name.toLowerCase
+    Secret(lower) || List("authorization", "api-key", "token", "secret").exists(lower.contains)
+
 /** Root of every SDK failure. */
 sealed abstract class TypeSafeException(message: String, cause: Throwable = null)
     extends RuntimeException(message, cause)

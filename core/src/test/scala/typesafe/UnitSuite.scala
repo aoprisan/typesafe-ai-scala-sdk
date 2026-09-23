@@ -163,6 +163,12 @@ class UnitSuite extends munit.FunSuite:
     assertEquals(ConnectionException(new java.io.IOException("reset")).getMessage, "Connection error: reset")
   }
 
+  test("a gateway's key is masked in logs as well as the API's") {
+    val secret = List("Authorization", "cookie", "cf-aig-authorization", "x-portkey-api-key", "x-gateway-token", "x-client-secret")
+    for name <- secret do assert(Constants.isSecret(name), name)
+    for name <- List("content-type", "x-typesafe-request-id", "retry-after") do assert(!Constants.isSecret(name), name)
+  }
+
   test("client configuration") {
     val noEnv: String => Option[String] = _ => None
     intercept[ConfigException](TypeSafeClient(ClientConfig(env = noEnv)))

@@ -480,4 +480,4 @@ object TypeSafeClient:
     new URI(uri.getScheme, null, uri.getHost, uri.getPort, uri.getPath, null, null).toString
 
   private def redacted(headers: Map[String, String]): Map[String, String] =
-    headers.map((k, v) => k -> (if Constants.Secret(k.toLowerCase) then "[REDACTED]" else v))
+    headers.map((k, v) => k -> (if Constants.isSecret(k) then "[REDACTED]" else v))
