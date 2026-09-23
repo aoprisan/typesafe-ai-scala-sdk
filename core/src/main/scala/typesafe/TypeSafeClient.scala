@@ -417,10 +417,11 @@ object TypeSafeClient:
       case (None, Some(dir)) => Some(CassetteMode.Replay(dir))
       case (None, None)      => None
     // A replaying client never sends anything, so it has no use for a key.
-    val key = resolve(config.apiKey, Constants.ApiKeyEnv)
+    val key = resolve(config.apiKey, Constants.ApiKeyEnv).map(_.trim).filter(_.nonEmpty)
     if key.isEmpty && !cassette.exists(_.isInstanceOf[CassetteMode.Replay]) then
       throw ConfigException(s"No API key was provided. Pass apiKey or set the ${Constants.ApiKeyEnv} environment variable.")
-    if key.exists(_.exists(c => c == '\r' || c == '\n')) then throw ConfigException("The API key contains invalid characters.")
+    if key.exists(_.exists(c => c < '!' || c > '~')) then
+      throw ConfigException("API key must contain only printable ASCII characters without whitespace.")
     checkTimeout(config.timeout)
     config.retry.validate()
     val baseUrl = resolve(config.baseUrl, Constants.BaseUrlEnv).getOrElse(Constants.DefaultBaseUrl).reverse.dropWhile(_ == '/').reverse

@@ -96,6 +96,12 @@ class UnitSuite extends munit.FunSuite:
     assertEquals(answers("department").asInstanceOf[ChoiceAnswer].ranked.head, "technical" -> 0.84)
   }
 
+  test("a bad model entry is named by its index, as the Python SDK names it") {
+    val j = Json.parse("""{"models":[{"name":"a","description":"","release_date":""},{}]}""").toOption.get
+    val path = try { Decode.models(j); "" } catch case Decode.Failure(p, _) => p
+    assertEquals(path, "models[1].name")
+  }
+
   private def pathOf(j: Json): String =
     try { Decode.systemOne(j, (_, _) => ()); "" } catch case Decode.Failure(p, _) => p
 
@@ -159,6 +165,10 @@ class UnitSuite extends munit.FunSuite:
     intercept[ConfigException](TypeSafeClient(ClientConfig(apiKey = Some("k"), baseUrl = Some("not a url"), env = noEnv)))
     intercept[ConfigException](TypeSafeClient(ClientConfig(apiKey = Some("k"), baseUrl = Some("/v1"), env = noEnv)))
     intercept[ConfigException](TypeSafeClient(ClientConfig(apiKey = Some("k"), baseUrl = Some("ftp://h"), env = noEnv)))
+    assertEquals(TypeSafeClient(ClientConfig(apiKey = Some("  sk-test\n"), env = noEnv)).defaultModel, "jev-latest")
+    for bad <- List("", "   ", "sk test", "sk\ttest", "sk-\u007f", "sk-é") do
+      val e = intercept[ConfigException](TypeSafeClient(ClientConfig(apiKey = Some(bad), env = noEnv)))
+      assert(e.getMessage.contains(if bad.trim.isEmpty then "No API key" else "printable ASCII"), bad)
     val env = Map("TYPESAFE_API_KEY" -> "  envkey ", "TYPESAFE_BASE_URL" -> "http://h:1///", "TYPESAFE_DEFAULT_MODEL" -> "   ")
     val c = TypeSafeClient(ClientConfig(env = env.get))
     assertEquals(c.baseUrl, "http://h:1")

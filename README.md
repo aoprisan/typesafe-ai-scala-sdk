@@ -11,7 +11,7 @@ typed questions and get typed answers back.
 
 - **No runtime dependencies.** It uses the JDK `HttpClient` and a small internal JSON AST, so it won't
   pull a circe/jsoniter/sttp version into your build.
-- **Same behaviour as the official Python SDK** (`typesafe-sdk` 0.6.0): environment variables,
+- **Same behaviour as the official Python SDK** (`typesafe-sdk` 0.7.1): environment variables,
   defaults, retry semantics, error classification and forward-compatible decoding.
 - Scala 3.3 LTS, JDK 17+ (the Ox binding alone needs 21).
 - Three flavours per call: blocking, `CompletableFuture`, and Scala `Future`.
