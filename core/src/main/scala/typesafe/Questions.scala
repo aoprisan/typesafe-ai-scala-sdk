@@ -98,12 +98,16 @@ final case class Questions(entries: VectorMap[String, Question]):
     if entries.isEmpty then throw InvalidRequestException("At least one question is required.")
     entries.foreach {
       case (name, Score(_, levels)) if levels.isEmpty => throw emptyScore(name)
+      case (name, Choice(_, options)) if options.isEmpty => throw emptyChoice(name)
       case (name, RawQuestion(json))                  => validateRaw(name, json)
       case _                                          => ()
     }
 
   private def emptyScore(name: String) =
     InvalidRequestException(s"""Score question "$name" has no criteria; at least one score is required.""")
+
+  private def emptyChoice(name: String) =
+    InvalidRequestException(s"""Choice question "$name" has no criteria; at least one option is required.""")
 
   private def validateRaw(name: String, json: Json): Unit =
     val tpe = json.get("type").flatMap(_.asString).filter(_.nonEmpty).getOrElse {
@@ -120,7 +124,7 @@ final case class Questions(entries: VectorMap[String, Question]):
         case Json.Arr(a)    => a.isEmpty
         case Json.Obj(o)    => o.isEmpty
         case Json.Num(n)    => n == 0
-      if tpe == "score" && empty then throw emptyScore(name)
+      if empty then throw (if tpe == "score" then emptyScore(name) else emptyChoice(name))
 
 object Questions:
   val empty: Questions = Questions(VectorMap.empty)

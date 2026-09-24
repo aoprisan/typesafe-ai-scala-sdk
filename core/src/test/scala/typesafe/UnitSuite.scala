@@ -67,6 +67,9 @@ class UnitSuite extends munit.FunSuite:
   test("local validation mirrors the python sdk") {
     intercept[InvalidRequestException](Questions.empty.validate())
     intercept[InvalidRequestException](Questions("s" -> Score("x")).validate())
+    val noOptions = intercept[InvalidRequestException](Questions("c" -> Choice.labels("x")).validate())
+    assert(noOptions.getMessage.contains("at least one option is required"), noOptions.getMessage)
+    intercept[InvalidRequestException](Questions("r" -> RawQuestion(Json.obj("type" -> "choice", "criteria" -> Json.obj()))).validate())
     intercept[InvalidRequestException](Questions("r" -> RawQuestion(Json.obj("instructions" -> "x"))).validate())
     intercept[InvalidRequestException](Questions("r" -> RawQuestion(Json.obj("type" -> ""))).validate())
     intercept[InvalidRequestException](Questions("r" -> RawQuestion(Json.obj("type" -> "choice"))).validate())
@@ -138,6 +141,9 @@ class UnitSuite extends munit.FunSuite:
     assertEquals(RetryAfter.parse(Map("Retry-After" -> List("2"))), Some(2.seconds))
     assertEquals(RetryAfter.parse(Map("retry-after" -> List("-1"))), None)
     assertEquals(RetryAfter.parse(Map("retry-after" -> List("Wed, 21 Oct 2015 07:28:00 GMT"))), Some(Duration.Zero))
+    // Longer than a FiniteDuration can hold: unusable, not an exception thrown out of the retry loop.
+    assertEquals(RetryAfter.parse(Map("retry-after" -> List("1e12"))), None)
+    assertEquals(RetryAfter.parse(Map("retry-after-ms" -> List("1e16"))), None)
   }
 
   test("backoff and stop rules match the python sdk") {

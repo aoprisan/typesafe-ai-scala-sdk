@@ -512,7 +512,7 @@ All failures extend the sealed `TypeSafeException`:
 | Exception                     | When                                                                    |
 | ----------------------------- | ----------------------------------------------------------------------- |
 | `ConfigException`             | missing API key, invalid base URL, non-positive timeout, invalid retry policy, record and replay both set |
-| `InvalidRequestException`     | no questions, empty score criteria, malformed raw question, unencodable state |
+| `InvalidRequestException`     | no questions, empty score or choice criteria, malformed raw question, unencodable state |
 | `ApiException`                | non-2xx after retries; `kind`, `detail`, `body`, `requestId`, `retryAfter` |
 | `ConnectionException`         | no response (DNS, connect, reset, read)                                 |
 | `TimeoutException`            | an attempt exceeded its timeout                                         |

@@ -13,7 +13,7 @@ object Constants:
   val DefaultBaseUrl = "https://api.typesafe.ai"
   val DefaultModel = "jev-latest"
   val DefaultTimeout: FiniteDuration = 10.seconds
-  val Version = "0.3.0"
+  val Version = "0.4.0"
   val SdkName = "typesafe-sdk-scala"
 
   private[typesafe] val SystemOnePath = "/v1/systemone"
@@ -155,13 +155,13 @@ private[typesafe] object RetryAfter:
       val t = raw.trim
       (if t.isEmpty then Some(0.0) else t.toDoubleOption)
         .filter(v => !v.isNaN && !v.isInfinite && v >= 0)
-        .map(v => (v * 1000).round.micros)
+        .flatMap(v => finite((v * 1000).round))
     }
     ms.orElse {
       headerLookup(headers, Constants.RetryAfterHeader).flatMap { raw =>
         val t = raw.trim
         (if t.isEmpty then Some(0.0) else t.toDoubleOption) match
-          case Some(v) if !v.isNaN && !v.isInfinite && v >= 0 => Some((v * 1000000).round.micros)
+          case Some(v) if !v.isNaN && !v.isInfinite && v >= 0 => finite((v * 1000000).round)
           case Some(_) => None
           case None =>
             scala.util
@@ -169,10 +169,17 @@ private[typesafe] object RetryAfter:
               .toOption
               .map { at =>
                 val d = JDuration.between(java.time.Instant.now(), at.toInstant)
-                if d.isNegative then Duration.Zero else d.toMillis.millis
+                if d.isNegative then Some(Duration.Zero) else finite(d.toMillis * 1000)
               }
+              .flatten
       }
     }
+
+  /** A delay too long for `FiniteDuration` is no delay we can honour: `None`, as Rust's
+    * `Duration::try_from_secs_f64` gives, rather than an exception out of a callback.
+    */
+  private def finite(micros: Long): Option[FiniteDuration] =
+    scala.util.Try(micros.micros).toOption
 
 /** Retry configuration; semantics match the official Python SDK (Tenacity-based). */
 final case class RetryPolicy(

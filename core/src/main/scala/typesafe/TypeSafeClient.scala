@@ -233,12 +233,15 @@ final class TypeSafeClient private (
         catch case NonFatal(e) => CompletableFuture.failedFuture(e)
       case (Some(CassetteMode.Record(dir)), Some(key)) =>
         val sent = send(call, attempt, boundAttempt)
-        sent.thenApply { ok =>
+        val out = sent.thenApply { ok =>
           record(dir, key, ok._1)
           ok
-        }.whenComplete { (_, err) =>
+        }
+        // Cancelling `out` must reach the exchange, as `send` does for its own future.
+        out.whenComplete { (_, err) =>
           if err.isInstanceOf[CancellationException] then sent.cancel(true)
         }
+        out
       case _ => send(call, attempt, boundAttempt)
 
   private def send(
@@ -364,23 +367,35 @@ final class TypeSafeClient private (
       inFlight.set(current)
       if result.isCancelled then current.cancel(true) // cancelled while this attempt was starting
       current.whenComplete { (ok, err) =>
-        if result.isDone then ()
-        else if err == null then result.complete(ok)
-        else
-          val e = unwrap(err)
-          if !call.policy.isRetryable(e) then result.completeExceptionally(e)
-          else
-            val delay = call.policy.delay(attempt, e, scala.util.Random.nextDouble())
-            val elapsed = (System.nanoTime() - started).nanos
-            if call.policy.shouldStop(attempt, elapsed, delay) then result.completeExceptionally(e)
-            else
-              val exec = CompletableFuture.delayedExecutor(delay.toNanos, TimeUnit.NANOSECONDS)
-              exec.execute { () =>
-                try attemptLoop(result, inFlight, attempt + 1, call, started)
-                catch case NonFatal(t) => result.completeExceptionally(t)
-              }
+        try step(result, inFlight, attempt, call, started, ok, err)
+        catch case NonFatal(t) => result.completeExceptionally(t) // never leave `result` pending
       }
       ()
+
+  private def step(
+      result: CompletableFuture[(Json, ResponseMeta, String)],
+      inFlight: AtomicReference[CompletableFuture[?]],
+      attempt: Int,
+      call: PreparedCall,
+      started: Long,
+      ok: (Json, ResponseMeta, String),
+      err: Throwable
+  ): Unit =
+    if result.isDone then ()
+    else if err == null then result.complete(ok)
+    else
+      val e = unwrap(err)
+      if !call.policy.isRetryable(e) then result.completeExceptionally(e)
+      else
+        val delay = call.policy.delay(attempt, e, scala.util.Random.nextDouble())
+        val elapsed = (System.nanoTime() - started).nanos
+        if call.policy.shouldStop(attempt, elapsed, delay) then result.completeExceptionally(e)
+        else
+          val exec = CompletableFuture.delayedExecutor(delay.toNanos, TimeUnit.NANOSECONDS)
+          exec.execute { () =>
+            try attemptLoop(result, inFlight, attempt + 1, call, started)
+            catch case NonFatal(t) => result.completeExceptionally(t)
+          }
 
   private val protectedHeaders: Map[String, String] = apiKey.map(k => "Authorization" -> s"Bearer $k").toMap ++ Map(
     "Accept" -> "application/json",
