@@ -319,3 +319,8 @@ object ToJson:
     }
 
   private def singleton[T]: ToJson[T] = a => Json.Str(a.toString)
+
+/** `value.toJson`: any value with a [[ToJson]] instance, as [[Json]] — `Ticket(...).toJson.render`.
+  * A type's own `toJson` member (as on [[Questions]]) takes precedence.
+  */
+extension [A: ToJson](a: A) def toJson: Json = ToJson[A](a)

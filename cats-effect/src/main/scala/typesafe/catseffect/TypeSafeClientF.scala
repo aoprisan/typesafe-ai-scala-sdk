@@ -132,8 +132,11 @@ final class TypeSafeClientF[F[_]] private (
   def withRandom(r: Random[F]): TypeSafeClientF[F] =
     new TypeSafeClientF[F](underlying, Some(r), onRetry)
 
-  /** Release the underlying HTTP client. [[TypeSafeClientF.resource]] does this for you. */
-  def close: F[Unit] = F.delay(underlying.close())
+  /** Release the underlying HTTP client. [[TypeSafeClientF.resource]] does this for you.
+    *
+    * On JDK 21 closing waits for the exchanges in flight to finish, so it runs on the blocking pool.
+    */
+  def close: F[Unit] = F.blocking(underlying.close())
 
   /** The backoff's randomness: whatever [[withRandom]] was given, else the ambient thread-local. */
   private val jitter: F[Double] =

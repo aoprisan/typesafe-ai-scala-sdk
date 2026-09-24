@@ -67,6 +67,9 @@ class UnitSuite extends munit.FunSuite:
   test("local validation mirrors the python sdk") {
     intercept[InvalidRequestException](Questions.empty.validate())
     intercept[InvalidRequestException](Questions("s" -> Score("x")).validate())
+    val noOptions = intercept[InvalidRequestException](Questions("c" -> Choice.labels("x")).validate())
+    assert(noOptions.getMessage.contains("at least one option is required"), noOptions.getMessage)
+    intercept[InvalidRequestException](Questions("r" -> RawQuestion(Json.obj("type" -> "choice", "criteria" -> Json.obj()))).validate())
     intercept[InvalidRequestException](Questions("r" -> RawQuestion(Json.obj("instructions" -> "x"))).validate())
     intercept[InvalidRequestException](Questions("r" -> RawQuestion(Json.obj("type" -> ""))).validate())
     intercept[InvalidRequestException](Questions("r" -> RawQuestion(Json.obj("type" -> "choice"))).validate())
@@ -138,6 +141,9 @@ class UnitSuite extends munit.FunSuite:
     assertEquals(RetryAfter.parse(Map("Retry-After" -> List("2"))), Some(2.seconds))
     assertEquals(RetryAfter.parse(Map("retry-after" -> List("-1"))), None)
     assertEquals(RetryAfter.parse(Map("retry-after" -> List("Wed, 21 Oct 2015 07:28:00 GMT"))), Some(Duration.Zero))
+    // Longer than a FiniteDuration can hold: unusable, not an exception thrown out of the retry loop.
+    assertEquals(RetryAfter.parse(Map("retry-after" -> List("1e12"))), None)
+    assertEquals(RetryAfter.parse(Map("retry-after-ms" -> List("1e16"))), None)
   }
 
   test("backoff and stop rules match the python sdk") {
@@ -185,4 +191,38 @@ class UnitSuite extends munit.FunSuite:
     assertEquals(c.baseUrl, "http://h:1")
     assertEquals(c.defaultModel, "jev-latest")
     assertEquals(TypeSafeClient(ClientConfig(model = Some("jev-2"), env = env.get)).defaultModel, "jev-2")
+  }
+
+  test("a config's toString keeps the key and secret headers out of the logs") {
+    val config = ClientConfig(
+      apiKey = Some("sk-live-123"),
+      baseUrl = Some("https://gw.example"),
+      headers = Map("Authorization" -> "Bearer sk-live-123", "x-portkey-api-key" -> "pk-9", "X-Trace" -> "t-1")
+    )
+    val shown = config.toString
+    assert(!shown.contains("sk-live-123"), shown)
+    assert(!shown.contains("pk-9"), shown)
+    assert(shown.contains("apiKey=Some([REDACTED])"), shown)
+    assert(shown.contains("X-Trace -> t-1"), shown)
+    assert(shown.contains("https://gw.example"), shown)
+    assert(ClientConfig().toString.contains("apiKey=None"))
+  }
+
+  test("ApiException matches on status and kind") {
+    def classify(e: TypeSafeException): String = e match
+      case ApiException(429, _)                         => "rate limited"
+      case ApiException(_, ApiErrorKind.Authentication) => "bad key"
+      case ApiException(status, _)                      => s"api $status"
+      case _                                            => "other"
+    assertEquals(classify(ApiException(429, None, Map.empty, None)), "rate limited")
+    assertEquals(classify(ApiException(401, None, Map.empty, None)), "bad key")
+    assertEquals(classify(ApiException(500, None, Map.empty, None)), "api 500")
+    assertEquals(classify(ConfigException("x")), "other")
+  }
+
+  test("toJson on any value with a ToJson instance") {
+    assertEquals(Ticket("Payouts", Some(1), Nil, Channel.Email).toJson.render,
+      """{"subject":"Payouts","priority":1,"tags":[],"channel":"Email"}""")
+    assertEquals(42.toJson, Json.Num(42))
+    assertEquals(List("a").toJson, Json.arr("a"))
   }

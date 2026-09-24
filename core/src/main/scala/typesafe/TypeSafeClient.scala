@@ -30,7 +30,15 @@ final case class ClientConfig(
     env: String => Option[String] = sys.env.get,
     record: Option[Path] = None,
     replay: Option[Path] = None
-)
+):
+  /** Shows every setting but the credentials: the API key, and the value of any header that
+    * carries one (`Authorization`, `X-Api-Key`, a gateway's `*-token`, ...), are `[REDACTED]`, so a
+    * config can be logged without leaking a key.
+    */
+  override def toString: String =
+    val shownHeaders = headers.map((k, v) => k -> (if Constants.isSecret(k) then "[REDACTED]" else v))
+    s"ClientConfig(apiKey=${apiKey.map(_ => "[REDACTED]")}, baseUrl=$baseUrl, model=$model, timeout=$timeout, " +
+      s"retry=$retry, headers=$shownHeaders, httpClient=$httpClient, record=$record, replay=$replay)"
 
 /** Per-call overrides. `extraBody` fields are shallow-merged last over `state`/`model`/`questions`. */
 final case class CallOptions(
@@ -71,6 +79,11 @@ private[typesafe] final case class PreparedCall(
   * res(urgent).noul   // Double
   * res(team).choice   // String
   * }}}
+  *
+  * Every call has an `...Either` twin ([[systemOneEither]], [[askEither]], [[modelsEither]]) that
+  * returns the SDK's own sealed [[TypeSafeException]] in a `Left` instead of throwing it.
+  *
+  * An `AutoCloseable`, so `scala.util.Using(TypeSafeClient())(...)` releases it.
   */
 final class TypeSafeClient private (
     val baseUrl: String,
@@ -81,7 +94,7 @@ final class TypeSafeClient private (
     apiKey: Option[String],
     http: HttpClient,
     cassette: Option[TypeSafeClient.CassetteMode]
-):
+) extends AutoCloseable:
   import TypeSafeClient.*
 
   override def toString: String = s"TypeSafeClient($baseUrl, model=$defaultModel)"
@@ -110,6 +123,26 @@ final class TypeSafeClient private (
   def systemOneFuture[S: ToJson](state: S, questions: Questions, options: CallOptions = CallOptions.default): Future[SystemOneResponse] =
     toScala(systemOneAsync(state, questions, options))
 
+  /** As [[systemOne]], but the SDK's own failures come back in the value instead of being thrown.
+    *
+    * [[TypeSafeException]] is sealed, so a match on the `Left` is checked for exhaustiveness. Only
+    * that hierarchy is caught: `InterruptedException` (how a blocked caller is cancelled) and bugs
+    * still propagate as exceptions.
+    *
+    * {{{
+    * client.systemOneEither(ticket, questions) match
+    *   case Right(res)                 => res(urgent).noul
+    *   case Left(ApiException(429, _)) => ... // rate limited
+    *   case Left(e)                    => throw e
+    * }}}
+    */
+  def systemOneEither[S: ToJson](
+      state: S,
+      questions: Questions,
+      options: CallOptions = CallOptions.default
+  ): Either[TypeSafeException, SystemOneResponse] =
+    narrow(systemOne(state, questions, options))
+
   // ---- Rubrics ------------------------------------------------------------------------------
 
   /** Ask the questions of a [[Rubric]] about `state` and decode the answers into it:
@@ -122,6 +155,11 @@ final class TypeSafeClient private (
 
   /** [[ask]], returning a Scala `Future` that fails with the typed [[TypeSafeException]]. */
   def askFuture[R](using rubric: Rubric[R]): AskingFuture[R] = AskingFuture(rubric)
+
+  /** As [[ask]], with the SDK's failures in the value: `client.askEither[Triage](state)`. See
+    * [[systemOneEither]].
+    */
+  def askEither[R](using rubric: Rubric[R]): AskingEither[R] = AskingEither(rubric)
 
   final class Asking[R] private[TypeSafeClient] (rubric: Rubric[R]):
     def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): R =
@@ -136,6 +174,10 @@ final class TypeSafeClient private (
     def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): Future[R] =
       toScala(AskingAsync(rubric)(state, options))
 
+  final class AskingEither[R] private[TypeSafeClient] (rubric: Rubric[R]):
+    def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): Either[TypeSafeException, R] =
+      narrow(Asking(rubric)(state, options))
+
   // ---- Models ------------------------------------------------------------------------------
 
   object models:
@@ -147,7 +189,19 @@ final class TypeSafeClient private (
 
     def listFuture(options: CallOptions = CallOptions.default): Future[ListModelsResponse] = toScala(listAsync(options))
 
-  /** Release the underlying HTTP client (JDK 21+; no-op on older JDKs). */
+    /** As [[list]], with the SDK's failures in the value. See [[systemOneEither]]. */
+    def listEither(options: CallOptions = CallOptions.default): Either[TypeSafeException, ListModelsResponse] =
+      narrow(list(options))
+
+  /** The models available to this API key, with the SDK's failures in the value; the same as
+    * `models.listEither`. See [[systemOneEither]].
+    */
+  def modelsEither(options: CallOptions = CallOptions.default): Either[TypeSafeException, ListModelsResponse] =
+    models.listEither(options)
+
+  /** Release the underlying HTTP client (JDK 21+; no-op on older JDKs). On JDK 21 this blocks until
+    * the exchanges in flight have finished.
+    */
   def close(): Unit = (http: Any) match
     case c: AutoCloseable => c.close()
     case _                => ()
@@ -233,12 +287,15 @@ final class TypeSafeClient private (
         catch case NonFatal(e) => CompletableFuture.failedFuture(e)
       case (Some(CassetteMode.Record(dir)), Some(key)) =>
         val sent = send(call, attempt, boundAttempt)
-        sent.thenApply { ok =>
+        val out = sent.thenApply { ok =>
           record(dir, key, ok._1)
           ok
-        }.whenComplete { (_, err) =>
+        }
+        // Cancelling `out` must reach the exchange, as `send` does for its own future.
+        out.whenComplete { (_, err) =>
           if err.isInstanceOf[CancellationException] then sent.cancel(true)
         }
+        out
       case _ => send(call, attempt, boundAttempt)
 
   private def send(
@@ -364,23 +421,35 @@ final class TypeSafeClient private (
       inFlight.set(current)
       if result.isCancelled then current.cancel(true) // cancelled while this attempt was starting
       current.whenComplete { (ok, err) =>
-        if result.isDone then ()
-        else if err == null then result.complete(ok)
-        else
-          val e = unwrap(err)
-          if !call.policy.isRetryable(e) then result.completeExceptionally(e)
-          else
-            val delay = call.policy.delay(attempt, e, scala.util.Random.nextDouble())
-            val elapsed = (System.nanoTime() - started).nanos
-            if call.policy.shouldStop(attempt, elapsed, delay) then result.completeExceptionally(e)
-            else
-              val exec = CompletableFuture.delayedExecutor(delay.toNanos, TimeUnit.NANOSECONDS)
-              exec.execute { () =>
-                try attemptLoop(result, inFlight, attempt + 1, call, started)
-                catch case NonFatal(t) => result.completeExceptionally(t)
-              }
+        try step(result, inFlight, attempt, call, started, ok, err)
+        catch case NonFatal(t) => result.completeExceptionally(t) // never leave `result` pending
       }
       ()
+
+  private def step(
+      result: CompletableFuture[(Json, ResponseMeta, String)],
+      inFlight: AtomicReference[CompletableFuture[?]],
+      attempt: Int,
+      call: PreparedCall,
+      started: Long,
+      ok: (Json, ResponseMeta, String),
+      err: Throwable
+  ): Unit =
+    if result.isDone then ()
+    else if err == null then result.complete(ok)
+    else
+      val e = unwrap(err)
+      if !call.policy.isRetryable(e) then result.completeExceptionally(e)
+      else
+        val delay = call.policy.delay(attempt, e, scala.util.Random.nextDouble())
+        val elapsed = (System.nanoTime() - started).nanos
+        if call.policy.shouldStop(attempt, elapsed, delay) then result.completeExceptionally(e)
+        else
+          val exec = CompletableFuture.delayedExecutor(delay.toNanos, TimeUnit.NANOSECONDS)
+          exec.execute { () =>
+            try attemptLoop(result, inFlight, attempt + 1, call, started)
+            catch case NonFatal(t) => result.completeExceptionally(t)
+          }
 
   private val protectedHeaders: Map[String, String] = apiKey.map(k => "Authorization" -> s"Bearer $k").toMap ++ Map(
     "Accept" -> "application/json",
@@ -441,6 +510,21 @@ object TypeSafeClient:
 
   /** Shorthand for an explicit key with everything else defaulted. */
   def withApiKey(apiKey: String): TypeSafeClient = apply(ClientConfig(apiKey = Some(apiKey)))
+
+  /** As [[apply]], but a configuration problem comes back as a `Left` instead of being thrown. */
+  def either(config: ClientConfig = ClientConfig()): Either[ConfigException, TypeSafeClient] =
+    try Right(apply(config))
+    catch case e: ConfigException => Left(e)
+
+  /** Moves the SDK's own failures into the value and leaves every other one alone.
+    *
+    * Catching `TypeSafeException` and nothing else is deliberate: `InterruptedException` is how a
+    * blocked caller is cancelled (a supervised scope winding a fork down, say), so turning it into a
+    * `Left` would quietly swallow the cancellation. It stays an exception, as do bugs.
+    */
+  private def narrow[A](call: => A): Either[TypeSafeException, A] =
+    try Right(call)
+    catch case e: TypeSafeException => Left(e)
 
   private def checkTimeout(t: FiniteDuration): Unit =
     if t <= Duration.Zero then throw ConfigException("timeout must be a positive duration.")

@@ -3,49 +3,24 @@ package typesafe.oxdirect
 import ox.flow.Flow
 import typesafe.*
 
-/** Moves the SDK's own failures into the value and leaves every other one alone.
-  *
-  * Catching `TypeSafeException` and nothing else is deliberate: `InterruptedException` is how a
-  * supervised scope winds a fork down, so turning it into a `Left` would quietly swallow a
-  * cancellation. It stays an exception, as do bugs.
+// `systemOneEither`, `askEither` and `modelsEither` used to be extensions here. They are members of
+// `TypeSafeClient` now, with the same signatures and the same narrowing (only `TypeSafeException`
+// goes into the `Left`; `InterruptedException`, how a supervised scope winds a fork down, stays an
+// exception), so `client.systemOneEither(...)` compiles unchanged and needs no import. Ox's `either`
+// blocks take them as they are:
+//
+//   import ox.either.*
+//   val summary: Either[TypeSafeException, String] = either:
+//     val res = client.systemOneEither(ticket, questions).ok()
+//     s"urgency ${res(urgent).noul}"
+
+/** What the ox `askEither` extension used to return; `client.askEither` is now
+  * [[typesafe.TypeSafeClient.askEither]], which returns the core's own `AskingEither`.
   */
-private def narrow[A](call: => A): Either[TypeSafeException, A] =
-  try Right(call)
-  catch case e: TypeSafeException => Left(e)
-
-extension (client: TypeSafeClient)
-
-  /** As `systemOne`, but the SDK's own failures come back in the value.
-    *
-    * [[typesafe.TypeSafeException]] is sealed, so the compiler checks the match for you, and the
-    * result drops straight into an `either` block:
-    *
-    * {{{
-    * import ox.either.*
-    *
-    * val summary: Either[TypeSafeException, String] = either:
-    *   val res = client.systemOneEither(ticket, questions).ok()
-    *   s"urgency ${res(urgent).noul}"
-    * }}}
-    */
-  def systemOneEither[S: ToJson](
-      state: S,
-      questions: Questions,
-      options: CallOptions = CallOptions.default
-  ): Either[TypeSafeException, SystemOneResponse] =
-    narrow(client.systemOne(state, questions, options))
-
-  /** The models available to this API key, with the SDK's failures in the value. */
-  def modelsEither(options: CallOptions = CallOptions.default): Either[TypeSafeException, ListModelsResponse] =
-    narrow(client.models.list(options))
-
-  /** As `client.ask[R]`, with the SDK's failures in the value: `client.askEither[Triage](state)`. */
-  def askEither[R](using rubric: Rubric[R]): AskingEither[R] = AskingEither(client, rubric)
-
-/** A pending [[askEither]]: give it the state. */
+@deprecated("client.askEither is now a member of TypeSafeClient and returns TypeSafeClient#AskingEither", "0.4.0")
 final class AskingEither[R] private[oxdirect] (client: TypeSafeClient, rubric: Rubric[R]):
   def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): Either[TypeSafeException, R] =
-    narrow(client.ask(using rubric)(state, options))
+    client.askEither(using rubric)(state, options)
 
 /** [[ox.flow.Flow]] operators that ask the same questions of every element of a batch of states.
   *

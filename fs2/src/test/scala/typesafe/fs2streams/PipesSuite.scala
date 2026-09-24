@@ -74,14 +74,14 @@ class PipesSuite extends munit.CatsEffectSuite:
       }
   }
 
-  test("attempt pipe pairs each state with its outcome and keeps the stream alive") {
+  test("either pipe pairs each state with its outcome and keeps the stream alive") {
     api.respondTo { r =>
       val i = indexOf(r)
       if i % 2 == 0 then Reply(200, answer(i)) else Reply(400, """{"error":{"message":"nope"}}""")
     }
     Stream
       .emits(states)
-      .through(client.systemOneAttemptPipe(questions, maxConcurrent = 3))
+      .through(client.systemOneEitherPipe(questions, maxConcurrent = 3))
       .compile
       .toVector
       .map { got =>
@@ -126,14 +126,14 @@ class PipesSuite extends munit.CatsEffectSuite:
     yield assert(end - start < 1.second, s"a burst of three should not have waited, took ${end - start}")
   }
 
-  test("the throttled attempt pipe keeps each state with its outcome") {
+  test("the throttled either pipe keeps each state with its outcome") {
     api.respondTo { r =>
       val i = indexOf(r)
       if i % 2 == 0 then Reply(200, answer(i)) else Reply(400, """{"error":{"message":"nope"}}""")
     }
     Stream
       .emits(states)
-      .through(client.systemOneThrottledAttemptPipe(questions, every = 10.millis, maxConcurrent = 3))
+      .through(client.systemOneThrottledEitherPipe(questions, every = 10.millis, maxConcurrent = 3))
       .compile
       .toVector
       .map { got =>

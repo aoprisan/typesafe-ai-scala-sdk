@@ -68,3 +68,25 @@ class TypeSafeClientTaskSuite extends munit.FunSuite:
     api.respond(_ => Reply(200, okBody))
     TypeSafeClientTask.use(config)(_.systemOne("x", questions)).map(res => assert(res(urgent).isYes(0.8))).runToFuture
   }
+
+  test("the Either variants put the SDK's own failures in the value") {
+    api.respond(_ => Reply(429, """{"detail":"slow down"}"""))
+    val c = TypeSafeClientTask.fromClient(TypeSafeClient(config.copy(retry = RetryPolicy.none)))
+    val checked =
+      for
+        one    <- c.systemOneEither("x", questions)
+        models <- c.models.listEither()
+      yield
+        one match
+          case Left(ApiException(429, _)) => ()
+          case other                      => fail(s"expected a 429 in the Left, got $other")
+        assert(models.left.exists(_.isInstanceOf[ApiException]), models.toString)
+    checked.runToFuture
+  }
+
+  test("resource builds a client and closes it on release") {
+    api.respond(_ => Reply(200, okBody))
+    TypeSafeClientTask.resource(config).use(_.systemOneEither("x", questions)).map { res =>
+      assertEquals(res.map(_(urgent).noul), Right(0.9))
+    }.runToFuture
+  }
