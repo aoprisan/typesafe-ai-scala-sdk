@@ -34,7 +34,7 @@ object StayingInQuota extends IOApp.Simple:
           // flight: 600 calls a minute, in bursts of three. The bucket is per pipe, and a fresh one
           // is taken each time the stream runs.
           .through(
-            client.systemOneThrottledAttemptPipe(
+            client.systemOneThrottledEitherPipe(
               questions,
               every = 100.millis,
               burst = 3,

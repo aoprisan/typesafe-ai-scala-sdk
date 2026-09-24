@@ -192,3 +192,37 @@ class UnitSuite extends munit.FunSuite:
     assertEquals(c.defaultModel, "jev-latest")
     assertEquals(TypeSafeClient(ClientConfig(model = Some("jev-2"), env = env.get)).defaultModel, "jev-2")
   }
+
+  test("a config's toString keeps the key and secret headers out of the logs") {
+    val config = ClientConfig(
+      apiKey = Some("sk-live-123"),
+      baseUrl = Some("https://gw.example"),
+      headers = Map("Authorization" -> "Bearer sk-live-123", "x-portkey-api-key" -> "pk-9", "X-Trace" -> "t-1")
+    )
+    val shown = config.toString
+    assert(!shown.contains("sk-live-123"), shown)
+    assert(!shown.contains("pk-9"), shown)
+    assert(shown.contains("apiKey=Some([REDACTED])"), shown)
+    assert(shown.contains("X-Trace -> t-1"), shown)
+    assert(shown.contains("https://gw.example"), shown)
+    assert(ClientConfig().toString.contains("apiKey=None"))
+  }
+
+  test("ApiException matches on status and kind") {
+    def classify(e: TypeSafeException): String = e match
+      case ApiException(429, _)                         => "rate limited"
+      case ApiException(_, ApiErrorKind.Authentication) => "bad key"
+      case ApiException(status, _)                      => s"api $status"
+      case _                                            => "other"
+    assertEquals(classify(ApiException(429, None, Map.empty, None)), "rate limited")
+    assertEquals(classify(ApiException(401, None, Map.empty, None)), "bad key")
+    assertEquals(classify(ApiException(500, None, Map.empty, None)), "api 500")
+    assertEquals(classify(ConfigException("x")), "other")
+  }
+
+  test("toJson on any value with a ToJson instance") {
+    assertEquals(Ticket("Payouts", Some(1), Nil, Channel.Email).toJson.render,
+      """{"subject":"Payouts","priority":1,"tags":[],"channel":"Email"}""")
+    assertEquals(42.toJson, Json.Num(42))
+    assertEquals(List("a").toJson, Json.arr("a"))
+  }

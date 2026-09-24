@@ -46,7 +46,7 @@ object BatchOfTickets extends IOApp.Simple:
       //    the failures can be counted, logged or fed back in later.
       val attempted =
         Stream.emits(backlog)
-          .through(client.systemOneAttemptPipe(questions, maxConcurrent = 4))
+          .through(client.systemOneEitherPipe(questions, maxConcurrent = 4))
           .fold((0, 0)) {
             case ((ok, failed), (_, Right(_))) => (ok + 1, failed)
             case ((ok, failed), (state, Left(e))) =>

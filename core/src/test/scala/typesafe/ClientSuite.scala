@@ -277,3 +277,45 @@ class ClientSuite extends munit.FunSuite:
     assertEquals((r.method, r.path), ("GET", "/v1/models"))
     assertEquals(r.header("content-type"), None)
   }
+
+  test("the Either variants put the SDK's own failures in the value") {
+    api.respond(_ => Reply(200, okBody))
+    assertEquals(client().systemOneEither("x", questions).map(_(urgent).noul), Right(0.999))
+
+    api.respond(_ => Reply(429, """{"detail":"slow down"}"""))
+    client(RetryPolicy.none).systemOneEither("x", questions) match
+      case Left(ApiException(429, ApiErrorKind.RateLimit)) => ()
+      case other                                            => fail(s"expected a 429 in the Left, got $other")
+
+    api.respond(_ => Reply(401, """{"detail":"Invalid API key"}"""))
+    assert(client().models.listEither().left.exists(_.isInstanceOf[ApiException]))
+    api.respond(_ => Reply(200, """{"models":[]}"""))
+    assertEquals(client().modelsEither().map(_.models), Right(Vector.empty))
+
+    // Rejected before sending: a failure of the SDK's own, so a Left too.
+    assert(client().systemOneEither("x", Questions.empty).left.exists(_.isInstanceOf[InvalidRequestException]))
+  }
+
+  test("an interrupt is still an exception, not a Left") {
+    api.respond(_ => Reply(200, okBody, delay = 2.seconds))
+    Thread.currentThread().interrupt()
+    // Not `intercept`: it only catches non-fatal throwables, and an interrupt is not one.
+    val outcome =
+      try Right(client().systemOneEither("x", questions))
+      catch case _: InterruptedException => Left(Thread.currentThread().isInterrupted) // re-armed?
+      finally Thread.interrupted() // leave the flag clear for the next test
+    assertEquals(outcome, Left(true))
+  }
+
+  test("TypeSafeClient.either returns a configuration problem instead of throwing it") {
+    val noEnv: String => Option[String] = _ => None
+    assert(TypeSafeClient.either(ClientConfig(env = noEnv)).left.exists(_.getMessage.contains("No API key")))
+    val ok = TypeSafeClient.either(ClientConfig(apiKey = Some("sk-test"), baseUrl = Some(api.url), env = noEnv))
+    assertEquals(ok.map(_.baseUrl), Right(api.url))
+    ok.foreach(_.close())
+  }
+
+  test("the client is AutoCloseable") {
+    val closed = scala.util.Using(client())(_.defaultModel)
+    assertEquals(closed.toOption, Some("jev-latest"))
+  }

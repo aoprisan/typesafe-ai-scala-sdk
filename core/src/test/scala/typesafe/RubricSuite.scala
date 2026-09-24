@@ -93,6 +93,10 @@ class RubricSuite extends munit.FunSuite:
     assertEquals(Json.unsafeParse(api.requests.head.body).get("model"), Some(Json.Str("jev-2")))
     api.respond(_ => Reply(200, body()))
     assertEquals(client.askAsync[Triage]("again").get().refund, 0.25)
+    api.respond(_ => Reply(200, body()))
+    assertEquals(client.askEither[Triage]("again").map(_.tone), Right("rude"))
+    api.respond(_ => Reply(503))
+    assert(client.askEither[Triage]("again").left.exists(_.isInstanceOf[ApiException]))
   }
 
   test("a response the case class cannot hold names the answer") {

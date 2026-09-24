@@ -2,7 +2,11 @@ package typesafe
 
 import scala.collection.immutable.{SortedMap, VectorMap}
 
+/** One typed answer: a [[NoulAnswer]], [[ChoiceAnswer]] or [[ScoreAnswer]]. Sealed, so a match on it
+  * is checked for exhaustiveness.
+  */
 sealed trait Answer:
+  /** The wire name of the answer's type: `"noul"`, `"choice"` or `"score"`. */
   def kind: String
 
 /** Probability of "yes", 0 to 1. */
@@ -31,6 +35,7 @@ final case class ScoreAnswer(
   def mostLikelyLevel: Option[Int] = probabilities.maxByOption(_._2).map(_._1)
   def roundedLevel: Int = math.max(0, math.round(score).toInt)
 
+/** Token counts the API reported for a call; either may be absent. */
 final case class Usage(inputTokens: Option[Long] = None, outputTokens: Option[Long] = None)
 
 /** HTTP metadata of the exchange that produced a response. */
@@ -39,6 +44,9 @@ final case class ResponseMeta(status: Int, headers: Map[String, List[String]], a
     headers.collectFirst { case (k, v :: _) if k.equalsIgnoreCase(name) => v }
   def requestId: Option[String] = header(Constants.RequestIdHeader)
 
+/** The answers to one System One call, keyed by question name, with the model that gave them, token
+  * usage, the raw JSON body and the HTTP metadata. Look answers up by handle: `res(urgent).noul`.
+  */
 final case class SystemOneResponse(
     model: String,
     usage: Usage,
@@ -64,8 +72,10 @@ final case class SystemOneResponse(
   def choices: VectorMap[String, ChoiceAnswer] = answers.collect { case (k, a: ChoiceAnswer) => k -> a }
   def scores: VectorMap[String, ScoreAnswer] = answers.collect { case (k, a: ScoreAnswer) => k -> a }
 
+/** One model the API offers. `releaseDate` is the date as the API sent it, e.g. `2025-01-01`. */
 final case class ModelMetadata(name: String, description: String, releaseDate: String)
 
+/** The models available to the API key, in the order the API listed them. */
 final case class ListModelsResponse(models: Vector[ModelMetadata], meta: ResponseMeta)
 
 /** Decoding with dotted field paths for error messages. */

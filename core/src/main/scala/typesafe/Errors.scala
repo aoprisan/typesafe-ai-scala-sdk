@@ -4,6 +4,9 @@ import java.time.{Duration as JDuration, ZonedDateTime}
 import java.time.format.DateTimeFormatter
 import scala.concurrent.duration.*
 
+/** The SDK's fixed names and defaults: the environment variables a [[ClientConfig]] falls back on,
+  * the default base URL, model and timeout, and the SDK's own name and version.
+  */
 object Constants:
   val ApiKeyEnv = "TYPESAFE_API_KEY"
   val BaseUrlEnv = "TYPESAFE_BASE_URL"
@@ -48,6 +51,9 @@ final class ConfigException(message: String) extends TypeSafeException(message)
 final class InvalidRequestException(message: String, cause: Throwable = null)
     extends TypeSafeException(message, cause)
 
+/** What an [[ApiException]]'s HTTP status means, from [[ApiErrorKind.fromStatus]]: one case per
+  * status the API documents, `InternalServer` for any 5xx and `Other` for the rest.
+  */
 enum ApiErrorKind:
   case BadRequest, Authentication, PermissionDenied, NotFound, UnprocessableEntity, RateLimit, InternalServer, Other
 
@@ -84,6 +90,15 @@ final class ApiException(
   def retryAfter: Option[FiniteDuration] = RetryAfter.parse(headers)
 
 object ApiException:
+  /** Matches on the status and its [[ApiErrorKind]]:
+    *
+    * {{{
+    * case ApiException(429, _)                         => // rate limited
+    * case ApiException(_, ApiErrorKind.Authentication) => // bad key
+    * }}}
+    */
+  def unapply(e: ApiException): Some[(Int, ApiErrorKind)] = Some((e.status, e.kind))
+
   private[typesafe] def messageFor(body: Option[Json]): String =
     body.flatMap(extractMessage).getOrElse {
       body match

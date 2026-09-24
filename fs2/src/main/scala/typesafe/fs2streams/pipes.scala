@@ -48,7 +48,20 @@ extension [F[_]](client: TypeSafeClientF[F])(using F: Async[F])
 
   /** As [[systemOnePipe]], but one bad state does not sink the run: each state is emitted with its
     * outcome, so failures can be logged, counted or retried later.
+    *
+    * The failure side is the sealed [[typesafe.TypeSafeException]], as from
+    * [[typesafe.catseffect.TypeSafeClientF.systemOneEither]], so sorting the wreckage afterwards is
+    * a match the compiler checks. A failure that is not the SDK's own (a bug) still fails the stream.
     */
+  def systemOneEitherPipe[S: ToJson](
+      questions: Questions,
+      maxConcurrent: Int = 4,
+      options: CallOptions = CallOptions.default
+  ): Pipe[F, S, (S, Either[TypeSafeException, SystemOneResponse])] =
+    _.parEvalMap(maxConcurrent)(state => F.map(client.systemOneEither(state, questions, options))(state -> _))
+
+  /** As [[systemOneEitherPipe]], but every failure, the SDK's or not, lands in a `Left[Throwable]`. */
+  @deprecated("use systemOneEitherPipe, whose failures are the sealed TypeSafeException", "0.4.0")
   def systemOneAttemptPipe[S: ToJson](
       questions: Questions,
       maxConcurrent: Int = 4,
@@ -83,9 +96,25 @@ extension [F[_]](client: TypeSafeClientF[F])(using F: Async[F])
         in.parEvalMap(maxConcurrent)(state => throttle.acquire *> client.systemOne(state, questions, options))
       }
 
-  /** [[systemOneThrottledPipe]] with [[systemOneAttemptPipe]]'s outcomes: the pairing you want for a
+  /** [[systemOneThrottledPipe]] with [[systemOneEitherPipe]]'s outcomes: the pairing you want for a
     * long run against a rate-limited key, where one bad state should not cost you the whole batch.
     */
+  def systemOneThrottledEitherPipe[S: ToJson](
+      questions: Questions,
+      every: FiniteDuration,
+      burst: Int = 1,
+      maxConcurrent: Int = 4,
+      options: CallOptions = CallOptions.default
+  ): Pipe[F, S, (S, Either[TypeSafeException, SystemOneResponse])] =
+    in =>
+      Stream.eval(Throttle[F](every, burst)).flatMap { throttle =>
+        in.parEvalMap(maxConcurrent) { state =>
+          F.map(throttle.acquire *> client.systemOneEither(state, questions, options))(state -> _)
+        }
+      }
+
+  /** As [[systemOneThrottledEitherPipe]], but every failure, the SDK's or not, lands in a `Left[Throwable]`. */
+  @deprecated("use systemOneThrottledEitherPipe, whose failures are the sealed TypeSafeException", "0.4.0")
   def systemOneThrottledAttemptPipe[S: ToJson](
       questions: Questions,
       every: FiniteDuration,

@@ -42,8 +42,8 @@ always use the fake, because the real API cannot be asked to misbehave on cue.
 
 | Run                                                      | Shows                                                                   |
 | -------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `examplesFs2/runMain examples.streams.BatchOfTickets`    | `systemOnePipe` in input order, `systemOneAttemptPipe` for a run that must finish |
-| `examplesFs2/runMain examples.streams.StayingInQuota`    | `systemOneThrottledAttemptPipe`: bounding how fast calls *start*, not just how many are in flight |
+| `examplesFs2/runMain examples.streams.BatchOfTickets`    | `systemOnePipe` in input order, `systemOneEitherPipe` for a run that must finish |
+| `examplesFs2/runMain examples.streams.StayingInQuota`    | `systemOneThrottledEitherPipe`: bounding how fast calls *start*, not just how many are in flight |
 
 ### Monix (`examplesMonix`)
 

@@ -11,8 +11,9 @@ import typesafe.{ClientConfig, TypeSafeClient}
   * it cancels the HTTP exchange and re-arms the interrupt flag — which is exactly the contract a
   * supervised scope relies on when it winds a fork down.
   *
-  * What this module adds is the rest: a lifetime tied to a scope, the SDK's sealed failures as
-  * `Either`, and [[ox.flow.Flow]] operators for running a batch through System One.
+  * What this module adds is the rest: a lifetime tied to a scope and [[ox.flow.Flow]] operators for
+  * running a batch through System One. The SDK's sealed failures as `Either` (`systemOneEither`,
+  * `askEither`, `modelsEither`) are the core client's own members and drop into an `either` block.
   *
   * {{{
   * import ox.*

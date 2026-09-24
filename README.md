@@ -176,8 +176,8 @@ under one name, an enum case that carries data. A response the case class cannot
 missing, of another type, or a label the enum does not have — is a `ResponseValidationException` whose
 `fieldPath` names it (`answers.department.choice`).
 
-`askAsync` and `askFuture` are the other two flavours; the Cats Effect and Monix clients have `ask`,
-Cats Effect and Ox `askEither`. `Rubric[Triage].fromResponse(res)` decodes a response you already
+`askAsync`, `askFuture` and `askEither` (see [Errors](#errors)) are the other flavours; the Cats
+Effect and Monix clients have `ask` and `askEither` too. `Rubric[Triage].fromResponse(res)` decodes a response you already
 have, and both traits can be implemented by hand.
 
 ### Per-call options
@@ -310,8 +310,10 @@ TypeSafeStream.resource[IO]().flatMap { client =>
 
 - `systemOnePipe` — answers in input order; the first failure fails the stream.
 - `systemOneUnorderedPipe` — answers as they arrive.
-- `systemOneAttemptPipe` — emits `(state, Either[Throwable, SystemOneResponse])`, so one bad state
-  does not sink a long run.
+- `systemOneEitherPipe` — emits `(state, Either[TypeSafeException, SystemOneResponse])`, so one bad
+  state does not sink a long run. The failure side is the sealed SDK hierarchy, as with Cats Effect's
+  `systemOneEither`; a failure that is not the SDK's own still fails the stream. (It replaces
+  `systemOneAttemptPipe`, deprecated in 0.4.0, whose `Left` was any `Throwable`.)
 
 ### Staying inside a quota
 
@@ -327,8 +329,9 @@ Stream.emits(tickets).through(
 ```
 
 `every` is the steady spacing between call starts and `burst` how many may go at once after an idle
-stretch (the default of 1 spaces every call evenly). `systemOneThrottledAttemptPipe` is the same with
-`systemOneAttemptPipe`'s outcomes — the pairing you want for a long run against a rate-limited key.
+stretch (the default of 1 spaces every call evenly). `systemOneThrottledEitherPipe` is the same with
+`systemOneEitherPipe`'s outcomes — the pairing you want for a long run against a rate-limited key.
+(`systemOneThrottledAttemptPipe` is its deprecated `Throwable` counterpart.)
 
 The bucket is per pipe and a fresh one is taken each time the stream runs.
 
@@ -347,8 +350,11 @@ val task = TypeSafeClientTask.use() { client =>
 task.runToFuture.foreach(res => println(res(urgent).noul))
 ```
 
-`use` builds a client, runs the body and closes it on success, failure or cancellation;
-`create` and `fromClient` are there when you want to manage the lifetime yourself. Cancelling the
+`use` builds a client, runs the body and closes it on success, failure or cancellation, and
+`resource` does the same as a (Cats Effect 2) `Resource[Task, TypeSafeClientTask]`; `create` and
+`fromClient` are there when you want to manage the lifetime yourself. `systemOneEither`,
+`askEither` and `models.listEither` hand the SDK's own failures back as a value, as in the Cats
+Effect binding. Cancelling the
 `Task` aborts the request in flight, like the Cats Effect binding.
 
 Unlike that binding, this one drives the core's own retry loop rather than a `Task`-native one: Monix
@@ -386,15 +392,15 @@ supervised {
 }
 ```
 
-What the module adds is the rest: a lifetime tied to a scope, the sealed failures as `Either`, and
-`Flow` operators for a batch.
+What the module adds is the rest: a lifetime tied to a scope and `Flow` operators for a batch. The
+sealed failures as `Either` come from the core client itself (see [Errors](#errors)):
 
 ```scala
 client.systemOneEither(ticket, questions)   // Either[TypeSafeException, SystemOneResponse]
 client.modelsEither()                       // the same for the models call
 ```
 
-which drops straight into an `either` block:
+and drop straight into an `either` block:
 
 ```scala
 import ox.either.*
@@ -459,8 +465,11 @@ TypeSafeClient(ClientConfig(
 ))
 ```
 
-Explicit values win; blank environment values are ignored. Call `client.close()` when done (a no-op on
-JDK 17, where `HttpClient` isn't closeable).
+Explicit values win; blank environment values are ignored. The client is `AutoCloseable`: call
+`client.close()` when done, or use `scala.util.Using` (a no-op on JDK 17, where `HttpClient` isn't
+closeable). A config's `toString` shows `[REDACTED]` in place of the API key and of any credential
+header, so it is safe to log. `TypeSafeClient.either(config)` returns a `ConfigException` as a `Left`
+instead of throwing it.
 
 ## Recording and replaying
 
@@ -527,12 +536,30 @@ catch
   case e: ResponseValidationException => println(s"bad field ${e.fieldPath}")
 ```
 
+`ApiException(status, kind)` is also an extractor, for matching on the status alone:
+`case ApiException(429, _) =>` or `case ApiException(_, ApiErrorKind.Authentication) =>`.
+
 Error messages from FastAPI-style validation bodies are flattened, e.g.
 `questions.frustration.criteria: List should have at least 2 items`.
 
-Because the hierarchy is sealed, the Cats Effect and Ox bindings can also hand these back as a value
-— `systemOneEither` returns `Either[TypeSafeException, SystemOneResponse]` — and the compiler then
-checks the match for you.
+Because the hierarchy is sealed, every call can also hand these back as a value, and the compiler then
+checks the match for you:
+
+```scala
+client.systemOneEither(state, questions) match   // Either[TypeSafeException, SystemOneResponse]
+  case Right(res)                   => println(res(urgent).noul)
+  case Left(ApiException(429, _))   => println("rate limited")
+  case Left(e: TimeoutException)    => println(s"gave up after ${e.timeout}")
+  case Left(e)                      => throw e
+
+client.askEither[Triage](state)      // Either[TypeSafeException, Triage]
+client.modelsEither()                // Either[TypeSafeException, ListModelsResponse]; also models.listEither()
+TypeSafeClient.either(config)        // Either[ConfigException, TypeSafeClient]
+```
+
+Only `TypeSafeException` moves into the `Left`: `InterruptedException` (how a blocked caller is
+cancelled) and bugs are still thrown. The Cats Effect and Monix clients have the same methods in `F`
+and `Task`.
 
 ## Forward compatibility
 
