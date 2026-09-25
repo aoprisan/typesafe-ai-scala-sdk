@@ -24,7 +24,7 @@ typed questions and get typed answers back.
 ## Install
 
 ```scala
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala" % "0.4.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala" % "0.5.0"
 ```
 
 Effect bindings are separate artifacts; add one only if you want it. Each depends on the core.
@@ -38,10 +38,10 @@ Effect bindings are separate artifacts; add one only if you want it. Each depend
 | `typesafe-sdk-scala-ox`           | direct style: scopes, `Flow`, `Either`        | ox 1 (JDK 21+)           |
 
 ```scala
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-cats-effect" % "0.4.0"
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-fs2"         % "0.4.0"
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-monix"       % "0.4.0"
-libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-ox"          % "0.4.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-cats-effect" % "0.5.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-fs2"         % "0.5.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-monix"       % "0.5.0"
+libraryDependencies += "io.github.aoprisan" %% "typesafe-sdk-scala-ox"          % "0.5.0"
 ```
 
 Monix 3.x is built on Cats Effect 2, so the Monix and Cats Effect bindings cannot share a classpath:
@@ -56,8 +56,8 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 
 0.3.0 adds recording and replaying responses and rubrics derived from a case class (both below).
 
-0.4.0 tightens the API before it settles, and breaks source compatibility to do it: see
-[Upgrading to 0.4.0](#upgrading-to-040).
+0.5.0 tightens the API before it settles, and breaks source compatibility to do it: see
+[Upgrading to 0.5.0](#upgrading-to-050).
 
 ## Quick start
 
@@ -584,11 +584,11 @@ Only `TypeSafeException` moves into the `Left`: `InterruptedException` (how a bl
 cancelled) and bugs are still thrown. The Cats Effect and Monix clients have the same methods in `F`
 and `Task`.
 
-## Upgrading to 0.4.0
+## Upgrading to 0.5.0
 
-0.4.0 breaks source compatibility with 0.3.x in the places below; each is a mechanical change.
+0.5.0 breaks source compatibility with 0.4.x in the places below; each is a mechanical change.
 
-| 0.3.x                                                         | 0.4.0                                                                  |
+| 0.4.x                                                         | 0.5.0                                                                  |
 | ------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | `Noul(Some(json), …)`, `Score(…).copy(…)`, `Asked[A](name, q)` | the typed constructors (`Noul("…")`, `Score("…", levels*)`, …) and `.named` |
 | `Noul(None: Option[String])` sent `"instructions": null`       | instructions that encode to `null` are left out; `Noul()` for none     |
