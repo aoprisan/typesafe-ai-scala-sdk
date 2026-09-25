@@ -30,7 +30,7 @@ import typesafe.*
   try
     println(s"client    → $client")
 
-    // Which models the key can use. `releaseDate` is a string, exactly as the API sends it.
+    // Which models the key can use. `releaseDate` is a `java.time.LocalDate`.
     client.models.list().models.foreach(m => println(s"  model ${m.name} (${m.releaseDate}) — ${m.description}"))
 
     val urgent = Noul("The message conveys urgency").named("is_urgent")

@@ -1,6 +1,6 @@
 package typesafe.oxdirect
 
-import ox.{Ox, useInScope}
+import ox.Ox
 import typesafe.{ClientConfig, TypeSafeClient}
 
 /** The [[typesafe.TypeSafeClient]] in an Ox program.
@@ -23,7 +23,7 @@ import typesafe.{ClientConfig, TypeSafeClient}
   * val urgent = Noul("The message conveys urgency").named("is_urgent")
   *
   * supervised {
-  *   val client = TypeSafeOx.inScope()
+  *   val client = TypeSafeOx.useInScope()
   *   val a = fork { client.systemOne(ticketA, Questions.of(urgent)) }
   *   val b = fork { client.systemOne(ticketB, Questions.of(urgent)) }
   *   (a.join()(urgent).noul, b.join()(urgent).noul)
@@ -34,10 +34,12 @@ import typesafe.{ClientConfig, TypeSafeClient}
   */
 object TypeSafeOx:
 
-  /** A client whose HTTP resources are released when the enclosing scope ends, however it ends. */
-  def inScope(config: ClientConfig = ClientConfig())(using Ox): TypeSafeClient =
-    useInScope(TypeSafeClient(config))(_.close())
+  /** A client whose HTTP resources are released when the enclosing scope ends, however it ends;
+    * named after Ox's own `useInScope`, which it is built on.
+    */
+  def useInScope(config: ClientConfig = ClientConfig())(using Ox): TypeSafeClient =
+    ox.useInScope(TypeSafeClient(config))(_.close())
 
   /** Shorthand for an explicit key with everything else defaulted. */
   def withApiKey(apiKey: String)(using Ox): TypeSafeClient =
-    inScope(ClientConfig(apiKey = Some(apiKey)))
+    useInScope(ClientConfig(apiKey = Some(apiKey)))

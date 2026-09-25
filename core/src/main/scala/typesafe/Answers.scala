@@ -1,23 +1,37 @@
 package typesafe
 
+import java.time.LocalDate
+import java.time.format.DateTimeParseException
 import scala.collection.immutable.{SortedMap, VectorMap}
+
+/** What type an [[Answer]] is, with the name the API gives it on the wire. */
+enum AnswerKind(val wire: String):
+  case Noul extends AnswerKind("noul")
+  case Choice extends AnswerKind("choice")
+  case Score extends AnswerKind("score")
+
+  override def toString: String = wire
+
+object AnswerKind:
+  /** The kind the API calls `wire`, if this SDK knows it. */
+  def fromWire(wire: String): Option[AnswerKind] = values.find(_.wire == wire)
 
 /** One typed answer: a [[NoulAnswer]], [[ChoiceAnswer]] or [[ScoreAnswer]]. Sealed, so a match on it
   * is checked for exhaustiveness.
   */
 sealed trait Answer:
-  /** The wire name of the answer's type: `"noul"`, `"choice"` or `"score"`. */
-  def kind: String
+  /** The answer's type; `kind.wire` is its name on the wire. */
+  def kind: AnswerKind
 
 /** Probability of "yes", 0 to 1. */
 final case class NoulAnswer(noul: Double) extends Answer:
-  def kind = "noul"
+  def kind = AnswerKind.Noul
   def isYes(threshold: Double = 0.5): Boolean = noul >= threshold
 
 /** The selected option, every option's probability (server order) and confidence. */
 final case class ChoiceAnswer(choice: String, probabilities: VectorMap[String, Double], confidence: Double)
     extends Answer:
-  def kind = "choice"
+  def kind = AnswerKind.Choice
   def probability(label: String): Option[Double] = probabilities.get(label)
   def ranked: Vector[(String, Double)] = probabilities.toVector.sortBy(-_._2)
 
@@ -31,7 +45,7 @@ final case class ScoreAnswer(
     legend: SortedMap[Int, Json],
     probabilities: SortedMap[Int, Double]
 ) extends Answer:
-  def kind = "score"
+  def kind = AnswerKind.Score
   def mostLikelyLevel: Option[Int] = probabilities.maxByOption(_._2).map(_._1)
   def roundedLevel: Int = math.max(0, math.round(score).toInt)
 
@@ -72,8 +86,8 @@ final case class SystemOneResponse(
   def choices: VectorMap[String, ChoiceAnswer] = answers.collect { case (k, a: ChoiceAnswer) => k -> a }
   def scores: VectorMap[String, ScoreAnswer] = answers.collect { case (k, a: ScoreAnswer) => k -> a }
 
-/** One model the API offers. `releaseDate` is the date as the API sent it, e.g. `2025-01-01`. */
-final case class ModelMetadata(name: String, description: String, releaseDate: String)
+/** One model the API offers, with the date it was released. */
+final case class ModelMetadata(name: String, description: String, releaseDate: LocalDate)
 
 /** The models available to the API key, in the order the API listed them. */
 final case class ListModelsResponse(models: Vector[ModelMetadata], meta: ResponseMeta)
@@ -93,6 +107,11 @@ private[typesafe] object Decode:
     o.getOrElse(key, fail(join(prefix, key), s"missing field `$key`"))
 
   private def str(j: Json, path: String): String = j.asString.getOrElse(fail(path, "expected a string"))
+
+  private def date(j: Json, path: String): LocalDate =
+    val s = str(j, path)
+    try LocalDate.parse(s)
+    catch case _: DateTimeParseException => fail(path, s"expected an ISO-8601 date (yyyy-mm-dd), got ${Json.Str(s).render}")
 
   private def num(j: Json, path: String): Double = j.asDouble.getOrElse(fail(path, "expected a number"))
 
@@ -148,6 +167,6 @@ private[typesafe] object Decode:
       ModelMetadata(
         str(field(o, "name", p), s"$p.name"),
         str(field(o, "description", p), s"$p.description"),
-        str(field(o, "release_date", p), s"$p.release_date")
+        date(field(o, "release_date", p), s"$p.release_date")
       )
     }

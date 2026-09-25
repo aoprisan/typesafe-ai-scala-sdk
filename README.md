@@ -14,7 +14,8 @@ typed questions and get typed answers back.
 - **Same behaviour as the official Python SDK** (`typesafe-sdk` 0.7.1): environment variables,
   defaults, retry semantics, error classification and forward-compatible decoding.
 - Scala 3.3 LTS, JDK 17+ (the Ox binding alone needs 21).
-- Three flavours per call: blocking, `CompletableFuture`, and Scala `Future`.
+- Two flavours per call in the core, blocking and Scala `Future`; the effect bindings add calls you
+  can cancel.
 - Optional effect bindings: **Cats Effect**, **fs2**, **Monix** and **Ox**, each in its own artifact
   so the core stays dependency-free.
 
@@ -30,7 +31,7 @@ Effect bindings are separate artifacts; add one only if you want it. Each depend
 
 | Artifact                          | Adds                                         | Pulls in                 |
 | --------------------------------- | -------------------------------------------- | ------------------------ |
-| `typesafe-sdk-scala`              | blocking, `CompletableFuture`, `Future`       | nothing                  |
+| `typesafe-sdk-scala`              | blocking and `Future` calls                   | nothing                  |
 | `typesafe-sdk-scala-cats-effect`  | `TypeSafeClientF[F]` for any `Async[F]`       | cats-effect 3            |
 | `typesafe-sdk-scala-fs2`          | pipes for streams of states                   | fs2 3 (and the above)    |
 | `typesafe-sdk-scala-monix`        | `TypeSafeClientTask`                          | monix-eval 3             |
@@ -54,6 +55,9 @@ observer and the throttled fs2 pipes; the core has been on Maven Central since 0
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
 0.3.0 adds recording and replaying responses and rubrics derived from a case class (both below).
+
+0.4.0 tightens the API before it settles, and breaks source compatibility to do it: see
+[Upgrading to 0.4.0](#upgrading-to-040).
 
 ## Quick start
 
@@ -90,6 +94,10 @@ res.get(urgent)             // Option[NoulAnswer]
 set, and against a local fake server when it is not. See [examples/](examples/) for the rest.
 
 String keys work too: `Questions("is_urgent" -> Noul("…"))` with `res.noul("is_urgent")`.
+
+Questions are built only through these constructors and `.named`, so a handle's answer type always
+matches its question: `Asked[ScoreAnswer]("x", Noul("…"))` does not compile. Instructions that encode
+to `null` — a `None` — are left out rather than sent as `null`, and `Noul()` asks without any.
 
 ### State
 
@@ -176,8 +184,8 @@ under one name, an enum case that carries data. A response the case class cannot
 missing, of another type, or a label the enum does not have — is a `ResponseValidationException` whose
 `fieldPath` names it (`answers.department.choice`).
 
-`askAsync`, `askFuture` and `askEither` (see [Errors](#errors)) are the other flavours; the Cats
-Effect and Monix clients have `ask` and `askEither` too. `Rubric[Triage].fromResponse(res)` decodes a response you already
+`askFuture` and `askEither` (see [Errors](#errors)) are the other flavours; the Cats Effect and
+Monix clients have `ask` and `askEither` too, and the fs2 and Ox modules run a rubric over a batch. `Rubric[Triage].fromResponse(res)` decodes a response you already
 have, and both traits can be implemented by hand.
 
 ### Per-call options
@@ -197,17 +205,19 @@ Authentication and SDK-identification headers cannot be overridden.
 ### Async
 
 ```scala
-val f: Future[SystemOneResponse]            = client.systemOneFuture(state, questions)
-val cf: CompletableFuture[SystemOneResponse] = client.systemOneAsync(state, questions)
+val f: Future[SystemOneResponse] = client.systemOneFuture(state, questions)
+val t: Future[Triage]            = client.askFuture[Triage](state)
+val m: Future[ListModelsResponse] = client.models.listFuture()
 ```
 
-The Scala `Future` fails with the typed `TypeSafeException`. The `CompletableFuture` follows the Java
-convention and wraps failures in `CompletionException` / `ExecutionException`.
+The `Future` fails with the typed `TypeSafeException`, never a Java wrapper, so `recover` can match on
+it. The retry loop behind it is non-blocking, so no call ever parks a thread. Java callers can take a
+`CompletionStage` with `scala.jdk.FutureConverters` (`f.asJava`).
 
-The retry loop is non-blocking (`CompletableFuture.delayedExecutor`), so no call ever parks a thread.
-Cancelling the `CompletableFuture` is honoured end to end: the HTTP exchange in flight is aborted and
-no further retry is attempted. (A Scala `Future` cannot be cancelled, so `systemOneFuture` runs to
-completion either way.)
+A Scala `Future` cannot be cancelled, so a `systemOneFuture` runs to completion either way. For a
+call you can cancel, use an effect binding: the [Cats Effect](#cats-effect), [Monix](#monix) and
+[Ox](#ox) clients abort the HTTP exchange in flight, and the retries with it, when their fiber, task
+or fork is cancelled.
 
 ## Cats Effect
 
@@ -303,7 +313,7 @@ import fs2.Stream
 import typesafe.*
 import typesafe.fs2streams.*
 
-TypeSafeStream.resource[IO]().flatMap { client =>
+TypeSafeStream.stream[IO]().flatMap { client =>
   Stream.emits(tickets).through(client.systemOnePipe(questions, maxConcurrent = 8))
 }.map(_(urgent).noul).compile.toVector
 ```
@@ -312,8 +322,13 @@ TypeSafeStream.resource[IO]().flatMap { client =>
 - `systemOneUnorderedPipe` — answers as they arrive.
 - `systemOneEitherPipe` — emits `(state, Either[TypeSafeException, SystemOneResponse])`, so one bad
   state does not sink a long run. The failure side is the sealed SDK hierarchy, as with Cats Effect's
-  `systemOneEither`; a failure that is not the SDK's own still fails the stream. (It replaces
-  `systemOneAttemptPipe`, deprecated in 0.4.0, whose `Left` was any `Throwable`.)
+  `systemOneEither`; a failure that is not the SDK's own still fails the stream.
+- `askPipe[R]`, `askUnorderedPipe[R]`, `askEitherPipe[R]` — the same three for a
+  [rubric](#rubrics-as-case-classes): `Stream.emits(tickets).through(client.askPipe[Triage](maxConcurrent = 8))`
+  emits a `Triage` per ticket.
+
+`TypeSafeStream.stream[F](cfg)` is `TypeSafeClientF.resource[F](cfg)` as a single-element stream, and
+`TypeSafeStream.withApiKey[F](k)` the same with everything else defaulted.
 
 ### Staying inside a quota
 
@@ -331,7 +346,6 @@ Stream.emits(tickets).through(
 `every` is the steady spacing between call starts and `burst` how many may go at once after an idle
 stretch (the default of 1 spaces every call evenly). `systemOneThrottledEitherPipe` is the same with
 `systemOneEitherPipe`'s outcomes — the pairing you want for a long run against a rate-limited key.
-(`systemOneThrottledAttemptPipe` is its deprecated `Throwable` counterpart.)
 
 The bucket is per pipe and a fresh one is taken each time the stream runs.
 
@@ -344,15 +358,15 @@ import typesafe.monixeffect.*
 
 val urgent = Noul("The message conveys urgency").named("is_urgent")
 
-val task = TypeSafeClientTask.use() { client =>
+val task = TypeSafeClientTask.resource().use { client =>
   client.systemOne("My payouts have failed for 3 days!", Questions.of(urgent))
 }
 task.runToFuture.foreach(res => println(res(urgent).noul))
 ```
 
-`use` builds a client, runs the body and closes it on success, failure or cancellation, and
-`resource` does the same as a (Cats Effect 2) `Resource[Task, TypeSafeClientTask]`; `create` and
-`fromClient` are there when you want to manage the lifetime yourself. `systemOneEither`,
+`resource` is a (Cats Effect 2) `Resource[Task, TypeSafeClientTask]` that closes the client on
+success, failure or cancellation, as `TypeSafeClientF.resource` does; `withApiKey(k)` is the same with
+everything else defaulted, and `fromClient` lifts a client whose lifetime you manage yourself. `systemOneEither`,
 `askEither` and `models.listEither` hand the SDK's own failures back as a value, as in the Cats
 Effect binding. Cancelling the
 `Task` aborts the request in flight, like the Cats Effect binding.
@@ -366,8 +380,11 @@ rather than on your `Scheduler`.
 
 
 ```scala
-client.models.list().models.foreach(m => println(s"${m.name} (${m.releaseDate})"))
+client.models.list().models.foreach(m => println(s"${m.name} (${m.releaseDate})"))  // a LocalDate
 ```
+
+A release date that is not an ISO date (`yyyy-mm-dd`) is a `ResponseValidationException` naming it,
+e.g. `models[0].release_date`.
 
 ## Ox
 
@@ -385,7 +402,7 @@ import typesafe.oxdirect.*
 val urgent = Noul("The message conveys urgency").named("is_urgent")
 
 supervised {
-  val client = TypeSafeOx.inScope()          // closed when the scope ends
+  val client = TypeSafeOx.useInScope()       // closed when the scope ends, like Ox's own useInScope
   val a = fork { client.systemOne(ticketA, Questions.of(urgent)) }
   val b = fork { client.systemOne(ticketB, Questions.of(urgent)) }
   (a.join(), b.join())
@@ -415,10 +432,10 @@ val summary: Either[TypeSafeException, String] = either:
 
 ```scala
 supervised {
-  val client = TypeSafeOx.inScope()
+  val client = TypeSafeOx.useInScope()
   Flow.fromIterable(tickets)
-    .throttle(120, 1.minute)                              // Ox's own, no module code needed
-    .systemOnePar(client, questions, parallelism = 8)     // input order
+    .throttle(120, 1.minute)                                // Ox's own, no module code needed
+    .systemOnePar(client, questions, maxConcurrent = 8)     // input order
     .runToList()
 }
 ```
@@ -426,6 +443,8 @@ supervised {
 - `systemOnePar` — answers in input order; the first failure fails the flow.
 - `systemOneParUnordered` — answers as they arrive.
 - `systemOneParEither` — emits `(state, Either[TypeSafeException, SystemOneResponse])`.
+- `askPar[R]`, `askParUnordered[R]`, `askParEither[R]` — the same three for a
+  [rubric](#rubrics-as-case-classes): `Flow.fromIterable(tickets).askPar[Triage](client, maxConcurrent = 8)`.
 
 Rate limiting stays Ox's job: `Flow#throttle` is built in, so unlike the fs2 module there is no
 bucket to ship.
@@ -536,6 +555,10 @@ catch
   case e: ResponseValidationException => println(s"bad field ${e.fieldPath}")
 ```
 
+The exceptions are the SDK's to raise: their constructors are not public, so a failure you catch
+always carries what the SDK put there. A test that needs one can get it from a mock server, as the
+SDK's own tests do.
+
 `ApiException(status, kind)` is also an extractor, for matching on the status alone:
 `case ApiException(429, _) =>` or `case ApiException(_, ApiErrorKind.Authentication) =>`.
 
@@ -560,6 +583,28 @@ TypeSafeClient.either(config)        // Either[ConfigException, TypeSafeClient]
 Only `TypeSafeException` moves into the `Left`: `InterruptedException` (how a blocked caller is
 cancelled) and bugs are still thrown. The Cats Effect and Monix clients have the same methods in `F`
 and `Task`.
+
+## Upgrading to 0.4.0
+
+0.4.0 breaks source compatibility with 0.3.x in the places below; each is a mechanical change.
+
+| 0.3.x                                                         | 0.4.0                                                                  |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `Noul(Some(json), …)`, `Score(…).copy(…)`, `Asked[A](name, q)` | the typed constructors (`Noul("…")`, `Score("…", levels*)`, …) and `.named` |
+| `Noul(None: Option[String])` sent `"instructions": null`       | instructions that encode to `null` are left out; `Noul()` for none     |
+| `systemOneAsync`, `askAsync`, `models.listAsync` (`CompletableFuture`) | `systemOneFuture`, `askFuture`, `models.listFuture`; an effect binding to cancel |
+| `new ApiException(…)` and the other exception constructors      | raised by the SDK only; match on them as before, `ApiException(status, kind)` included |
+| `answer.kind == "noul"`                                       | `answer.kind == AnswerKind.Noul`; `kind.wire` is the string            |
+| `model.releaseDate: String`                                   | `java.time.LocalDate`                                                  |
+| `typesafe.RubricSupport`                                       | `typesafe.internal.RubricSupport` (generated code only; not an API)    |
+| `TypeSafeClientTask.use(cfg)(f)`, `TypeSafeClientTask.create(cfg)` | `TypeSafeClientTask.resource(cfg).use(f)`                         |
+| `TypeSafeStream.resource[F](cfg)`                             | `TypeSafeStream.stream[F](cfg)`                                        |
+| `TypeSafeOx.inScope(cfg)`                                     | `TypeSafeOx.useInScope(cfg)`                                           |
+| `systemOnePar(…, parallelism = n)` and the other Ox operators    | `maxConcurrent = n`, as in the fs2 pipes                               |
+| `systemOneAttemptPipe`, `systemOneThrottledAttemptPipe`         | `systemOneEitherPipe`, `systemOneThrottledEitherPipe` (`Left` is `TypeSafeException`) |
+| `typesafe.oxdirect.AskingEither`                              | `client.askEither[R]`, a member of `TypeSafeClient`                    |
+
+`Constants.Version` now comes from the build (the git tag), so a snapshot reports itself as one.
 
 ## Forward compatibility
 

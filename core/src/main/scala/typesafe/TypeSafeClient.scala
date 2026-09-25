@@ -105,10 +105,12 @@ final class TypeSafeClient private (
   def systemOne[S: ToJson](state: S, questions: Questions, options: CallOptions = CallOptions.default): SystemOneResponse =
     await(systemOneAsync(state, questions, options))
 
-  /** Non-blocking variant returning a Java `CompletableFuture` (failures arrive wrapped in
-    * `CompletionException`/`ExecutionException`, as usual for that API).
+  /** The non-blocking call the others are built on: cancelling the returned future aborts the
+    * exchange and stops the retry loop. Failures arrive wrapped in `CompletionException` /
+    * `ExecutionException`, as usual for that API, which is why it is the bindings' and not yours:
+    * [[systemOneFuture]] is the non-blocking call to use.
     */
-  def systemOneAsync[S: ToJson](
+  private[typesafe] def systemOneAsync[S: ToJson](
       state: S,
       questions: Questions,
       options: CallOptions = CallOptions.default
@@ -119,7 +121,7 @@ final class TypeSafeClient private (
       }
     catch case NonFatal(e) => CompletableFuture.failedFuture(e)
 
-  /** Scala `Future` variant; fails with the typed [[TypeSafeException]], never a Java wrapper. */
+  /** Non-blocking variant; fails with the typed [[TypeSafeException]], never a Java wrapper. */
   def systemOneFuture[S: ToJson](state: S, questions: Questions, options: CallOptions = CallOptions.default): Future[SystemOneResponse] =
     toScala(systemOneAsync(state, questions, options))
 
@@ -150,8 +152,8 @@ final class TypeSafeClient private (
     */
   def ask[R](using rubric: Rubric[R]): Asking[R] = Asking(rubric)
 
-  /** [[ask]], returning a Java `CompletableFuture`. */
-  def askAsync[R](using rubric: Rubric[R]): AskingAsync[R] = AskingAsync(rubric)
+  /** [[ask]] on the `CompletableFuture` the bindings build on; see [[systemOneAsync]]. */
+  private[typesafe] def askAsync[R](using rubric: Rubric[R]): AskingAsync[R] = AskingAsync(rubric)
 
   /** [[ask]], returning a Scala `Future` that fails with the typed [[TypeSafeException]]. */
   def askFuture[R](using rubric: Rubric[R]): AskingFuture[R] = AskingFuture(rubric)
@@ -165,7 +167,7 @@ final class TypeSafeClient private (
     def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): R =
       rubric.fromResponse(systemOne(state, rubric.questions, options))
 
-  final class AskingAsync[R] private[TypeSafeClient] (rubric: Rubric[R]):
+  private[typesafe] final class AskingAsync[R] private[TypeSafeClient] (rubric: Rubric[R]):
     def apply[S: ToJson](state: S, options: CallOptions = CallOptions.default): CompletableFuture[R] =
       try mapCancelable(systemOneAsync(state, rubric.questions, options))(rubric.fromResponse)
       catch case NonFatal(e) => CompletableFuture.failedFuture(e)
@@ -183,7 +185,7 @@ final class TypeSafeClient private (
   object models:
     def list(options: CallOptions = CallOptions.default): ListModelsResponse = await(listAsync(options))
 
-    def listAsync(options: CallOptions = CallOptions.default): CompletableFuture[ListModelsResponse] =
+    private[typesafe] def listAsync(options: CallOptions = CallOptions.default): CompletableFuture[ListModelsResponse] =
       try mapCancelable(execute(modelsCall(options))) { (raw, meta, endpoint) => decodeModels(raw, meta, endpoint) }
       catch case NonFatal(e) => CompletableFuture.failedFuture(e)
 
@@ -212,7 +214,7 @@ final class TypeSafeClient private (
     try
       val stateJson =
         try ToJson[S](state)
-        catch case NonFatal(e) => throw InvalidRequestException(s"The state could not be encoded as JSON: ${e.getMessage}", e)
+        catch case NonFatal(e) => throw InvalidRequestException(s"The state could not be encoded as JSON: ${e.getMessage}", Some(e))
       questions.validate()
       val body = VectorMap(
         "state" -> stateJson,
@@ -341,8 +343,8 @@ final class TypeSafeClient private (
     if err != null then
       val cause = unwrap(err)
       val mapped = cause match
-        case t: HttpTimeoutException  => TimeoutException(call.attemptTimeout, t)
-        case t: CancellationException => TimeoutException(call.attemptTimeout, t)
+        case t: HttpTimeoutException  => TimeoutException(call.attemptTimeout, Some(t))
+        case t: CancellationException => TimeoutException(call.attemptTimeout, Some(t))
         case e: TypeSafeException     => e
         case other                    => ConnectionException(other)
       log.log(System.Logger.Level.INFO, s"${call.endpoint} <- ${mapped.getClass.getSimpleName}")

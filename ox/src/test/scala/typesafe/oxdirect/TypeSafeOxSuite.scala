@@ -5,6 +5,10 @@ import ox.{fork, supervised}
 import ox.flow.Flow
 import scala.concurrent.duration.*
 import typesafe.*
+import typesafe.rubric.*
+
+/** The rubric the ask flows decode into: the same single question the suite asks by hand. */
+final case class Urgency(@noul("The message conveys urgency") isUrgent: Double) derives Rubric
 
 class TypeSafeOxSuite extends munit.FunSuite:
   private val api = MockApi()
@@ -44,7 +48,7 @@ class TypeSafeOxSuite extends munit.FunSuite:
   test("the core's blocking call is the Ox call: it just works inside a scope") {
     api.respond(_ => Reply(200, okBody))
     val noul = supervised {
-      val client = TypeSafeOx.inScope(config)
+      val client = TypeSafeOx.useInScope(config)
       // bound to a local: `systemOne(..)(urgent)` would read `urgent` as the implicit ToJson
       val res = client.systemOne("Stripe keeps failing.", questions)
       res(urgent).noul
@@ -56,7 +60,7 @@ class TypeSafeOxSuite extends munit.FunSuite:
     api.respondTo(r => Reply(200, answer(indexOf(r)), delay = 150.millis))
     val started = System.nanoTime()
     val nouls = supervised {
-      val client = TypeSafeOx.inScope(config)
+      val client = TypeSafeOx.useInScope(config)
       val forks = states.map { state =>
         fork {
           val res = client.systemOne(state, questions)
@@ -70,11 +74,11 @@ class TypeSafeOxSuite extends munit.FunSuite:
     assert(elapsed < 600.millis, s"six 150ms calls in parallel should not have taken $elapsed")
   }
 
-  test("inScope closes the client when the scope ends") {
+  test("useInScope closes the client when the scope ends") {
     api.respond(_ => Reply(200, okBody))
     val http = HttpClient.newHttpClient()
     supervised {
-      val client = TypeSafeOx.inScope(config.copy(httpClient = Some(http)))
+      val client = TypeSafeOx.useInScope(config.copy(httpClient = Some(http)))
       client.systemOne("x", questions)
       ()
     }
@@ -101,7 +105,7 @@ class TypeSafeOxSuite extends munit.FunSuite:
   test("systemOneEither puts the SDK's own failure in the value") {
     api.respond(_ => Reply(401, """{"error":{"message":"bad key"}}"""))
     supervised {
-      TypeSafeOx.inScope(config).systemOneEither("x", questions) match
+      TypeSafeOx.useInScope(config).systemOneEither("x", questions) match
         case Left(e: ApiException) => assertEquals(e.status, 401)
         case other                 => fail(s"expected a Left(ApiException), got $other")
     }
@@ -111,7 +115,7 @@ class TypeSafeOxSuite extends munit.FunSuite:
     api.respond(_ => Reply(400, """{"error":{"message":"nope"}}"""))
     val described = supervised {
       // No `case _ =>` on purpose: this compiles only while the failure type stays sealed and narrow.
-      TypeSafeOx.inScope(config).systemOneEither("x", questions) match
+      TypeSafeOx.useInScope(config).systemOneEither("x", questions) match
         case Right(_)                             => "ok"
         case Left(_: ConfigException)             => "config"
         case Left(_: InvalidRequestException)     => "request"
@@ -127,7 +131,7 @@ class TypeSafeOxSuite extends munit.FunSuite:
   test("modelsEither narrows the same way") {
     api.respond(_ => Reply(200, """{"models":[{"name":"jev-1","description":"d","release_date":"2025-01-01"}]}"""))
     supervised {
-      TypeSafeOx.inScope(config).modelsEither() match
+      TypeSafeOx.useInScope(config).modelsEither() match
         case Right(res) => assertEquals(res.models.map(_.name), Vector("jev-1"))
         case other      => fail(s"expected a Right, got $other")
     }
@@ -140,8 +144,8 @@ class TypeSafeOxSuite extends munit.FunSuite:
       Reply(200, answer(i), delay = (states.size - i) * 60.millis)
     }
     val nouls = supervised {
-      val client = TypeSafeOx.inScope(config)
-      Flow.fromIterable(states).systemOnePar(client, questions, parallelism = states.size).runToList()
+      val client = TypeSafeOx.useInScope(config)
+      Flow.fromIterable(states).systemOnePar(client, questions, maxConcurrent = states.size).runToList()
     }
     assertEquals(nouls.map(_(urgent).noul), states.indices.map(i => s"0.$i".toDouble).toList)
   }
@@ -152,8 +156,8 @@ class TypeSafeOxSuite extends munit.FunSuite:
       Reply(200, answer(i), delay = (states.size - i) * 60.millis)
     }
     val nouls = supervised {
-      val client = TypeSafeOx.inScope(config)
-      Flow.fromIterable(states).systemOneParUnordered(client, questions, parallelism = states.size).runToList()
+      val client = TypeSafeOx.useInScope(config)
+      Flow.fromIterable(states).systemOneParUnordered(client, questions, maxConcurrent = states.size).runToList()
     }.map(_(urgent).noul)
     assertEquals(nouls.sorted, states.indices.map(i => s"0.$i".toDouble).toList)
     assertNotEquals(nouls, nouls.sorted, "answers should not have been re-ordered back into input order")
@@ -165,13 +169,59 @@ class TypeSafeOxSuite extends munit.FunSuite:
       if i % 2 == 0 then Reply(200, answer(i)) else Reply(400, """{"error":{"message":"nope"}}""")
     }
     val got = supervised {
-      val client = TypeSafeOx.inScope(config)
-      Flow.fromIterable(states).systemOneParEither(client, questions, parallelism = 3).runToList()
+      val client = TypeSafeOx.useInScope(config)
+      Flow.fromIterable(states).systemOneParEither(client, questions, maxConcurrent = 3).runToList()
     }
     assertEquals(got.map(_._1), states.toList)
     got.zipWithIndex.foreach {
       case ((_, Right(res)), i) if i % 2 == 0 => assertEquals(res(urgent).noul, s"0.$i".toDouble)
       case ((_, Left(e: ApiException)), i)    => assertEquals(e.status, 400, s"ticket $i")
       case (other, i)                         => fail(s"unexpected outcome for ticket $i: $other")
+    }
+  }
+
+  test("askPar decodes each state's answers into the rubric, in input order") {
+    api.respondTo { r =>
+      val i = indexOf(r)
+      Reply(200, answer(i), delay = (states.size - i) * 60.millis)
+    }
+    val got = supervised {
+      val client = TypeSafeOx.useInScope(config)
+      Flow.fromIterable(states).askPar[Urgency](client, maxConcurrent = states.size).runToList()
+    }
+    assertEquals(got, states.indices.map(i => Urgency(s"0.$i".toDouble)).toList)
+  }
+
+  test("askParUnordered emits as answers arrive") {
+    api.respondTo { r =>
+      val i = indexOf(r)
+      Reply(200, answer(i), delay = (states.size - i) * 60.millis)
+    }
+    val nouls = supervised {
+      val client = TypeSafeOx.useInScope(config)
+      Flow.fromIterable(states).askParUnordered[Urgency](client, maxConcurrent = states.size).runToList()
+    }.map(_.isUrgent)
+    assertEquals(nouls.sorted, states.indices.map(i => s"0.$i".toDouble).toList)
+    assertNotEquals(nouls, nouls.sorted, "answers should not have been re-ordered back into input order")
+  }
+
+  test("askParEither keeps each state with its decoded answers or the SDK's failure") {
+    api.respondTo { r =>
+      indexOf(r) match
+        case 1 => Reply(400, """{"error":{"message":"nope"}}""")
+        // An answer of another type: the rubric cannot hold it.
+        case 2 => Reply(200, """{"model":"m","answers":{"is_urgent":{"type":"score","score":1,"confidence":1,"legend":{},"probabilities":{}}},"usage":{}}""")
+        case i => Reply(200, answer(i))
+    }
+    val got = supervised {
+      val client = TypeSafeOx.useInScope(config)
+      Flow.fromIterable(states).askParEither[Urgency](client, maxConcurrent = 3).runToList()
+    }
+    assertEquals(got.map(_._1), states.toList)
+    got.zipWithIndex.foreach {
+      case ((_, Left(e: ApiException)), 1)                => assertEquals(e.status, 400)
+      case ((_, Left(e: ResponseValidationException)), 2) => assertEquals(e.fieldPath, "answers.is_urgent")
+      case ((_, Right(u)), i) if i > 2 || i == 0          => assertEquals(u, Urgency(s"0.$i".toDouble))
+      case (other, i)                                     => fail(s"unexpected outcome for ticket $i: $other")
     }
   }

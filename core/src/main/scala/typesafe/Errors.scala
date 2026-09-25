@@ -16,7 +16,8 @@ object Constants:
   val DefaultBaseUrl = "https://api.typesafe.ai"
   val DefaultModel = "jev-latest"
   val DefaultTimeout: FiniteDuration = 10.seconds
-  val Version = "0.4.0"
+  /** The version this SDK was built as, from the build (a `vX.Y.Z` tag, or a snapshot between them). */
+  val Version: String = BuildInfo.version
   val SdkName = "typesafe-sdk-scala"
 
   private[typesafe] val SystemOnePath = "/v1/systemone"
@@ -38,17 +39,19 @@ object Constants:
     val lower = name.toLowerCase
     Secret(lower) || List("authorization", "api-key", "token", "secret").exists(lower.contains)
 
-/** Root of every SDK failure. */
-sealed abstract class TypeSafeException(message: String, cause: Throwable = null)
-    extends RuntimeException(message, cause)
+/** Root of every SDK failure. Sealed, and every subclass is built by the SDK alone, so a match on
+  * one is checked for exhaustiveness and what it carries is what the SDK put there.
+  */
+sealed abstract class TypeSafeException(message: String, cause: Option[Throwable] = None)
+    extends RuntimeException(message, cause.orNull)
 
 /** Missing API key, invalid timeout or retry policy, record and replay both set, or listing models
   * while replaying.
   */
-final class ConfigException(message: String) extends TypeSafeException(message)
+final class ConfigException private[typesafe] (message: String) extends TypeSafeException(message)
 
 /** Rejected locally before sending (no questions, empty score criteria, malformed raw question, unencodable state). */
-final class InvalidRequestException(message: String, cause: Throwable = null)
+final class InvalidRequestException private[typesafe] (message: String, cause: Option[Throwable] = None)
     extends TypeSafeException(message, cause)
 
 /** What an [[ApiException]]'s HTTP status means, from [[ApiErrorKind.fromStatus]]: one case per
@@ -76,7 +79,7 @@ private def suffix(endpoint: Option[String], core: String, headers: Map[String, 
     headerLookup(headers, Constants.RequestIdHeader).fold("")(id => s" (request_id=$id)")
 
 /** An unsuccessful HTTP response. `body` is the JSON error body, the raw text as `Json.Str`, or `None`. */
-final class ApiException(
+final class ApiException private[typesafe] (
     val status: Int,
     val body: Option[Json],
     val headers: Map[String, List[String]],
@@ -140,15 +143,15 @@ object ApiException:
     case _ => None
 
 /** The request never produced a response (DNS, connect, reset, read failure). */
-final class ConnectionException(cause: Throwable)
-    extends TypeSafeException(s"Connection error: ${Option(cause.getMessage).getOrElse(cause.getClass.getName)}", cause)
+final class ConnectionException private[typesafe] (cause: Throwable)
+    extends TypeSafeException(s"Connection error: ${Option(cause.getMessage).getOrElse(cause.getClass.getName)}", Some(cause))
 
 /** The request exceeded its per-attempt timeout. */
-final class TimeoutException(val timeout: FiniteDuration, cause: Throwable = null)
+final class TimeoutException private[typesafe] (val timeout: FiniteDuration, cause: Option[Throwable] = None)
     extends TypeSafeException(s"Request timed out (timeout=${timeout.toMillis / 1000.0}s).", cause)
 
 /** A 2xx response whose body is missing or has structurally invalid required data. */
-final class ResponseValidationException(
+final class ResponseValidationException private[typesafe] (
     val status: Int,
     val fieldPath: String,
     val detail: String,
@@ -161,7 +164,7 @@ final class ResponseValidationException(
   * client does not fall back to the network. Record it first (`TYPESAFE_RECORD=<dir>`); see
   * [[Cassette]].
   */
-final class ReplayMissException(val key: String, val path: java.nio.file.Path)
+final class ReplayMissException private[typesafe] (val key: String, val path: java.nio.file.Path)
     extends TypeSafeException(s"No recording for this request: $path does not exist (replaying, so nothing was sent).")
 
 private[typesafe] object RetryAfter:

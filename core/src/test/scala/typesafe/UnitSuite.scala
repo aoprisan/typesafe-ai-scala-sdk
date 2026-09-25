@@ -100,7 +100,7 @@ class UnitSuite extends munit.FunSuite:
   }
 
   test("a bad model entry is named by its index, as the Python SDK names it") {
-    val j = Json.parse("""{"models":[{"name":"a","description":"","release_date":""},{}]}""").toOption.get
+    val j = Json.parse("""{"models":[{"name":"a","description":"","release_date":"2025-01-01"},{}]}""").toOption.get
     val path = try { Decode.models(j); "" } catch case Decode.Failure(p, _) => p
     assertEquals(path, "models[1].name")
   }

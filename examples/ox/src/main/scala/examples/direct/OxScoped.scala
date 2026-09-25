@@ -33,7 +33,7 @@ import typesafe.oxdirect.*
   try
     supervised {
       // Closed when the scope ends, however it ends.
-      val client = TypeSafeOx.inScope(demo.config)
+      val client = TypeSafeOx.useInScope(demo.config)
 
       // Two calls at once, joined back in place. No executor, no Future, no callback.
       val a = fork(client.systemOne(ticketA, questions))

@@ -20,7 +20,7 @@ import typesafe.*
   *
   * val urgent = Noul("The message conveys urgency").named("is_urgent")
   *
-  * val task = TypeSafeClientTask.use() { client =>
+  * val task = TypeSafeClientTask.resource().use { client =>
   *   client.systemOne("My payouts have failed for 3 days!", Questions.of(urgent))
   * }
   * task.runToFuture.foreach(res => println(res(urgent).noul))
@@ -80,8 +80,7 @@ final class TypeSafeClientTask private (val underlying: TypeSafeClient):
     def listEither(options: CallOptions = CallOptions.default): Task[Either[TypeSafeException, ListModelsResponse]] =
       narrow(list(options))
 
-  /** Release the underlying HTTP client. [[TypeSafeClientTask.use]] and [[TypeSafeClientTask.resource]]
-    * do this for you.
+  /** Release the underlying HTTP client. [[TypeSafeClientTask.resource]] does this for you.
     *
     * On JDK 21 closing waits for the exchanges in flight to finish, so it runs on an I/O scheduler
     * rather than tying up a compute thread.
@@ -119,17 +118,15 @@ final class TypeSafeClientTask private (val underlying: TypeSafeClient):
 
 object TypeSafeClientTask:
 
-  /** Builds a client, hands it to `f` and closes it afterwards, on success, failure or cancellation. */
-  def use[A](config: ClientConfig = ClientConfig())(f: TypeSafeClientTask => Task[A]): Task[A] =
-    create(config).bracket(f)(_.close)
-
-  /** A client whose HTTP resources are released when the (Cats Effect 2) `Resource` is released. */
+  /** A client whose HTTP resources are released when the (Cats Effect 2) `Resource` is released, on
+    * success, failure or cancellation: `TypeSafeClientTask.resource().use { client => ... }`.
+    */
   def resource(config: ClientConfig = ClientConfig()): Resource[Task, TypeSafeClientTask] =
-    Resource.make(create(config))(_.close)
+    Resource.make(Task.eval(new TypeSafeClientTask(TypeSafeClient(config))))(_.close)
 
-  /** Builds a client. Closing it is the caller's job; prefer [[use]]. */
-  def create(config: ClientConfig = ClientConfig()): Task[TypeSafeClientTask] =
-    Task.eval(new TypeSafeClientTask(TypeSafeClient(config)))
+  /** Shorthand for an explicit key with everything else defaulted. */
+  def withApiKey(apiKey: String): Resource[Task, TypeSafeClientTask] =
+    resource(ClientConfig(apiKey = Some(apiKey)))
 
   /** Lifts a client you already own; closing it stays your job. */
   def fromClient(client: TypeSafeClient): TypeSafeClientTask =
