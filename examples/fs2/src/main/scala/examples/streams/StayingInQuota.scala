@@ -26,7 +26,7 @@ object StayingInQuota extends IOApp.Simple:
     Resource.make(IO(Demo.open()))(d => IO(d.release())).map(_.config)
 
   def run: IO[Unit] =
-    Stream.resource(settings).flatMap(config => TypeSafeStream.resource[IO](config)).flatMap { client =>
+    Stream.resource(settings).flatMap(config => TypeSafeStream.stream[IO](config)).flatMap { client =>
       Stream.eval(IO.monotonic).flatMap { started =>
         Stream
           .emits(backlog)

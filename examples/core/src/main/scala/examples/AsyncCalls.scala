@@ -1,13 +1,15 @@
 package examples
 
-import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionStage
 import scala.concurrent.{Await, Future}
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.*
+import scala.jdk.FutureConverters.*
 import typesafe.*
 
-/** The same call in the three shapes the dependency-free core offers: blocking, Scala `Future` and
-  * `CompletableFuture` — plus what cancelling one actually does.
+/** The same call in the two shapes the dependency-free core offers, blocking and Scala `Future` —
+  * plus a `CompletionStage` for Java callers. A call you can cancel is an effect's job: the Cats
+  * Effect, Monix and Ox modules abort the exchange in flight when their fiber, task or fork goes.
   *
   * {{{
   * sbt "examples/runMain examples.asyncCalls"
@@ -44,15 +46,9 @@ import typesafe.*
     println(f"futures   ${nouls.map(n => f"$n%.3f").mkString(", ")}")
     println(f"           ${(System.nanoTime() - fanOut) / 1e6}%.0f ms in parallel")
 
-    // 3. CompletableFuture, for interop with Java code. Failures follow the Java convention and
-    //    come back wrapped in CompletionException.
-    val cf: CompletableFuture[SystemOneResponse] = client.systemOneAsync(tickets.head, questions)
-    println(f"java cf   ${cf.join()(urgent).noul}%.3f")
-
-    // Cancelling is honoured end to end: the exchange in flight is aborted and no retry follows.
-    // (A Scala Future cannot be cancelled, which is why this one is the CompletableFuture.)
-    val doomed = client.systemOneAsync(tickets.head, questions)
-    doomed.cancel(true)
-    println(s"cancelled → ${doomed.isCancelled}")
+    // 3. Java code wants a CompletionStage; the standard library converts the Future. Failures
+    //    then follow the Java convention and come back wrapped in CompletionException.
+    val stage: CompletionStage[SystemOneResponse] = client.systemOneFuture(tickets.head, questions).asJava
+    println(f"java cs   ${stage.toCompletableFuture.join()(urgent).noul}%.3f")
   finally client.close()
 }

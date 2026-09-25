@@ -6,7 +6,8 @@ Artifacts are published to Maven Central as
 `.github/workflows/release.yml`.
 
 The version comes from git tags via sbt-dynver, so there is no version to bump
-in `build.sbt`:
+in `build.sbt` or in the code (sbt-buildinfo hands it to the core, where
+`Constants.Version` and the `User-Agent` read it):
 
 - push to `main` → a `-SNAPSHOT` is published to the snapshot repository;
 - push a tag `vX.Y.Z` → `X.Y.Z` is published as a release.

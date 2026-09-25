@@ -61,11 +61,17 @@ lazy val root = project
 
 lazy val core = project
   .in(file("core"))
+  .enablePlugins(BuildInfoPlugin)
   .settings(commonSettings())
   .settings(
     name        := "typesafe-sdk-scala",
-    description := "Zero-dependency Scala 3 client for the TypeSafe AI System One API"
+    description := "Zero-dependency Scala 3 client for the TypeSafe AI System One API",
     // No runtime dependencies: the JDK HttpClient and an internal JSON AST.
+    // `Constants.Version` reads the version from here, so the User-Agent never drifts from the jar.
+    buildInfoKeys    := Seq[BuildInfoKey](version),
+    buildInfoPackage := "typesafe",
+    buildInfoObject  := "BuildInfo",
+    buildInfoOptions += BuildInfoOption.PackagePrivate
   )
 
 lazy val catsEffect = project

@@ -1,5 +1,6 @@
 package typesafe.monixeffect
 
+import monix.eval.Task
 import monix.execution.Scheduler.Implicits.global
 import scala.concurrent.duration.*
 import typesafe.*
@@ -64,9 +65,9 @@ class TypeSafeClientTaskSuite extends munit.FunSuite:
     assertEquals(api.requests.size, 1)
   }
 
-  test("use builds a client, runs the body and closes it") {
-    api.respond(_ => Reply(200, okBody))
-    TypeSafeClientTask.use(config)(_.systemOne("x", questions)).map(res => assert(res(urgent).isYes(0.8))).runToFuture
+  test("withApiKey builds a client from a key alone") {
+    // Nothing is sent: the shorthand's base URL is the real API's.
+    TypeSafeClientTask.withApiKey("sk-test").use(c => Task.now(c.defaultModel)).map(m => assert(m.nonEmpty)).runToFuture
   }
 
   test("the Either variants put the SDK's own failures in the value") {

@@ -92,8 +92,6 @@ class RubricSuite extends munit.FunSuite:
     assertEquals(Await.result(client.askFuture[Triage]("again", CallOptions(model = Some("jev-2"))), 5.seconds).team, Department.Sales)
     assertEquals(Json.unsafeParse(api.requests.head.body).get("model"), Some(Json.Str("jev-2")))
     api.respond(_ => Reply(200, body()))
-    assertEquals(client.askAsync[Triage]("again").get().refund, 0.25)
-    api.respond(_ => Reply(200, body()))
     assertEquals(client.askEither[Triage]("again").map(_.tone), Right("rude"))
     api.respond(_ => Reply(503))
     assert(client.askEither[Triage]("again").left.exists(_.isInstanceOf[ApiException]))

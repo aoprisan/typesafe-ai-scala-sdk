@@ -3,15 +3,24 @@ package typesafe
 import scala.collection.immutable.VectorMap
 import scala.reflect.ClassTag
 
-/** A typed question. Instructions, descriptions and levels are [[Json]], so structured rubrics work too. */
+/** A typed question. Instructions, descriptions and levels are [[Json]], so structured rubrics work too.
+  *
+  * [[Noul]], [[Choice]] and [[Score]] are built with their companions' smart constructors and the
+  * builder methods on them; their case-class constructors are the SDK's own, so an `Option` or a
+  * question of the wrong kind cannot slip past the typed ones.
+  */
 sealed trait Question:
   def toJson: Json
 
+/** Instructions as sent: a value that encodes to `null` (a `None`, say) means none at all. */
+private def instructionsOf[A: ToJson](instructions: A): Option[Json] =
+  Some(ToJson[A](instructions)).filter(_ != Json.Null)
+
 /** Yes/no question; the answer is the probability of "yes". */
-final case class Noul(
-    instructions: Option[Json] = None,
-    whenTrue: Option[Json] = None,
-    whenFalse: Option[Json] = None
+final case class Noul private[typesafe] (
+    instructions: Option[Json],
+    whenTrue: Option[Json],
+    whenFalse: Option[Json]
 ) extends Question:
   def describeTrue[A: ToJson](description: A): Noul = copy(whenTrue = Some(ToJson[A](description)))
   def describeFalse[A: ToJson](description: A): Noul = copy(whenFalse = Some(ToJson[A](description)))
@@ -27,10 +36,14 @@ final case class Noul(
     Json.Obj(VectorMap.from(("type" -> Json.Str("noul")) :: instructions.map("instructions" -> _).toList ++ criteria))
 
 object Noul:
-  def apply[A: ToJson](instructions: A): Noul = new Noul(instructions = Some(ToJson[A](instructions)))
+  /** `Noul("Is this a refund request?")`. Instructions that encode to `null` are left out. */
+  def apply[A: ToJson](instructions: A): Noul = new Noul(instructionsOf(instructions), None, None)
+
+  /** A yes/no question with no instructions of its own. */
+  def apply(): Noul = new Noul(None, None, None)
 
 /** Pick one option from a set you define. `None` descriptions are sent as `null`. */
-final case class Choice(
+final case class Choice private[typesafe] (
     instructions: Option[Json],
     criteria: VectorMap[String, Option[Json]]
 ) extends Question:
@@ -51,14 +64,14 @@ final case class Choice(
 object Choice:
   /** `Choice("Which team?", "billing" -> "Payments", "technical" -> "Bugs")` */
   def apply[A: ToJson](instructions: A, options: (String, String)*): Choice =
-    new Choice(Some(ToJson[A](instructions)), VectorMap.from(options.map((k, v) => k -> Some(Json.Str(v)))))
+    new Choice(instructionsOf(instructions), VectorMap.from(options.map((k, v) => k -> Some(Json.Str(v)))))
 
   /** A choice between undescribed labels. */
   def labels[A: ToJson](instructions: A, labels: String*): Choice =
-    new Choice(Some(ToJson[A](instructions)), VectorMap.from(labels.map(_ -> None)))
+    new Choice(instructionsOf(instructions), VectorMap.from(labels.map(_ -> None)))
 
 /** Rate along ordered levels (index 0 upwards); the answer is a probability-weighted level. */
-final case class Score(instructions: Option[Json], criteria: Vector[Json]) extends Question:
+final case class Score private[typesafe] (instructions: Option[Json], criteria: Vector[Json]) extends Question:
   def level[A: ToJson](description: A): Score = copy(criteria = criteria :+ ToJson[A](description))
 
   def named(name: String): Asked[ScoreAnswer] = Asked(name, this)
@@ -74,7 +87,7 @@ final case class Score(instructions: Option[Json], criteria: Vector[Json]) exten
 object Score:
   /** `Score("How frustrated?", "Calm", "Frustrated", "Very angry")` */
   def apply[A: ToJson](instructions: A, levels: String*): Score =
-    new Score(Some(ToJson[A](instructions)), levels.map(Json.Str(_)).toVector)
+    new Score(instructionsOf(instructions), levels.map(Json.Str(_)).toVector)
 
 /** A hand-built question object, passed through after light validation (must have a non-empty
   * string `type`). Useful for fields this SDK version does not model.
@@ -82,8 +95,11 @@ object Score:
 final case class RawQuestion(json: Json) extends Question:
   def toJson: Json = json
 
-/** A question with its name and the answer type it produces; read it back with `response(asked)`. */
-final case class Asked[A <: Answer](name: String, question: Question)(using val tag: ClassTag[A])
+/** A question with its name and the answer type it produces; read it back with `response(asked)`.
+  * Made by `.named(...)` on a [[Noul]], [[Choice]] or [[Score]], which is what ties the answer type
+  * to the question.
+  */
+final case class Asked[A <: Answer] private[typesafe] (name: String, question: Question)(using val tag: ClassTag[A])
 
 /** Ordered question name → question map. Answers come back under the same names. */
 final case class Questions(entries: VectorMap[String, Question]):

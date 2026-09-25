@@ -3,6 +3,7 @@ package typesafe
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{AtomicMoveNotSupportedException, Files, Path, StandardCopyOption}
 import java.security.MessageDigest
+import scala.collection.immutable.VectorMap
 
 /** Record and replay: System One responses kept on disk, one file per request.
   *
@@ -30,7 +31,7 @@ object Cassette:
     * compact JSON.
     */
   def key[S: ToJson](state: S, model: String, questions: Questions): String =
-    keyOf(Json.obj("state" -> ToJson[S](state), "model" -> model, "questions" -> questions.toJson).render)
+    keyOf(Json.Obj(VectorMap("state" -> ToJson[S](state), "model" -> Json.Str(model), "questions" -> questions.toJson)).render)
 
   /** The key of a request body that has already been encoded. */
   def keyOf(body: String): String =

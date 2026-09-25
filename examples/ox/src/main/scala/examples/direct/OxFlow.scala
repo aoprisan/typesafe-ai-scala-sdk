@@ -26,14 +26,14 @@ import typesafe.oxdirect.*
 
   try
     supervised {
-      val client = TypeSafeOx.inScope(demo.config)
+      val client = TypeSafeOx.useInScope(demo.config)
 
       // In input order, four calls in flight, no more than five started a second.
       val started = System.nanoTime()
       val answers = Flow
         .fromIterable(backlog)
         .throttle(5, 1.second)
-        .systemOnePar(client, questions, parallelism = 4)
+        .systemOnePar(client, questions, maxConcurrent = 4)
         .runToList()
       println(f"ordered   → ${answers.size} answers in ${(System.nanoTime() - started) / 1e6}%.0f ms")
       answers.zipWithIndex.foreach((r, i) => println(f"  #${i + 1}%-3d urgency ${r(urgent).noul}%.3f"))
@@ -42,7 +42,7 @@ import typesafe.oxdirect.*
       // the wreckage afterwards is a match the compiler checks.
       val outcomes = Flow
         .fromIterable(backlog)
-        .systemOneParEither(client, questions, parallelism = 4)
+        .systemOneParEither(client, questions, maxConcurrent = 4)
         .runToList()
       val (failed, ok) = outcomes.partitionMap((state, outcome) => outcome.left.map(state -> _))
       println(s"attempted → ${ok.size} answered, ${failed.size} failed")

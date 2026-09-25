@@ -20,7 +20,7 @@ import typesafe.catseffect.TypeSafeClientF
   *
   * val urgent = Noul("The message conveys urgency").named("is_urgent")
   *
-  * TypeSafeStream.resource[IO]().flatMap { client =>
+  * TypeSafeStream.stream[IO]().flatMap { client =>
   *   Stream.emits(tickets).through(client.systemOnePipe(Questions.of(urgent), maxConcurrent = 8))
   * }.map(_(urgent).noul).compile.toVector
   * }}}
@@ -59,15 +59,6 @@ extension [F[_]](client: TypeSafeClientF[F])(using F: Async[F])
       options: CallOptions = CallOptions.default
   ): Pipe[F, S, (S, Either[TypeSafeException, SystemOneResponse])] =
     _.parEvalMap(maxConcurrent)(state => F.map(client.systemOneEither(state, questions, options))(state -> _))
-
-  /** As [[systemOneEitherPipe]], but every failure, the SDK's or not, lands in a `Left[Throwable]`. */
-  @deprecated("use systemOneEitherPipe, whose failures are the sealed TypeSafeException", "0.4.0")
-  def systemOneAttemptPipe[S: ToJson](
-      questions: Questions,
-      maxConcurrent: Int = 4,
-      options: CallOptions = CallOptions.default
-  ): Pipe[F, S, (S, Either[Throwable, SystemOneResponse])] =
-    _.parEvalMap(maxConcurrent)(state => F.map(F.attempt(client.systemOne(state, questions, options)))(state -> _))
 
   /** As [[systemOnePipe]], but calls also start no faster than one every `every`.
     *
@@ -113,28 +104,52 @@ extension [F[_]](client: TypeSafeClientF[F])(using F: Async[F])
         }
       }
 
-  /** As [[systemOneThrottledEitherPipe]], but every failure, the SDK's or not, lands in a `Left[Throwable]`. */
-  @deprecated("use systemOneThrottledEitherPipe, whose failures are the sealed TypeSafeException", "0.4.0")
-  def systemOneThrottledAttemptPipe[S: ToJson](
-      questions: Questions,
-      every: FiniteDuration,
-      burst: Int = 1,
-      maxConcurrent: Int = 4,
-      options: CallOptions = CallOptions.default
-  ): Pipe[F, S, (S, Either[Throwable, SystemOneResponse])] =
-    in =>
-      Stream.eval(Throttle[F](every, burst)).flatMap { throttle =>
-        in.parEvalMap(maxConcurrent) { state =>
-          F.map(F.attempt(throttle.acquire *> client.systemOne(state, questions, options)))(state -> _)
-        }
-      }
+  /** [[systemOnePipe]] for a [[typesafe.Rubric]]: each state's answers decoded into `R`, in input
+    * order, at most `maxConcurrent` calls in flight.
+    *
+    * {{{
+    * Stream.emits(tickets).through(client.askPipe[Triage](maxConcurrent = 8))  // Stream[IO, Triage]
+    * }}}
+    *
+    * A response the rubric cannot hold fails the stream with [[typesafe.ResponseValidationException]],
+    * as any other failure that survives the retry policy does.
+    */
+  def askPipe[R](using rubric: Rubric[R]): AskPipe[F, R] = AskPipe(client, rubric)
+
+  /** As [[askPipe]], but answers are emitted as they arrive rather than in input order. */
+  def askUnorderedPipe[R](using rubric: Rubric[R]): AskUnorderedPipe[F, R] = AskUnorderedPipe(client, rubric)
+
+  /** [[systemOneEitherPipe]] for a [[typesafe.Rubric]]: each state paired with its decoded answers or
+    * the SDK's failure, so one bad state does not sink the run.
+    */
+  def askEitherPipe[R](using rubric: Rubric[R]): AskEitherPipe[F, R] = AskEitherPipe(client, rubric)
 
 object TypeSafeStream:
 
-  /** A single-element stream of a client whose HTTP resources close when the stream finishes. */
-  def resource[F[_]: Async](config: ClientConfig = ClientConfig()): Stream[F, TypeSafeClientF[F]] =
+  /** A single-element stream of a client whose HTTP resources close when the stream finishes; the
+    * stream form of [[typesafe.catseffect.TypeSafeClientF.resource]].
+    */
+  def stream[F[_]: Async](config: ClientConfig = ClientConfig()): Stream[F, TypeSafeClientF[F]] =
     Stream.resource(TypeSafeClientF.resource[F](config))
 
   /** Shorthand for an explicit key with everything else defaulted. */
   def withApiKey[F[_]: Async](apiKey: String): Stream[F, TypeSafeClientF[F]] =
-    resource[F](ClientConfig(apiKey = Some(apiKey)))
+    stream[F](ClientConfig(apiKey = Some(apiKey)))
+
+/** `client.askPipe[R]`, waiting for the pipe's settings: `client.askPipe[Triage](maxConcurrent = 8)`. */
+final class AskPipe[F[_], R] private[fs2streams] (client: TypeSafeClientF[F], rubric: Rubric[R])(using Async[F]):
+  def apply[S: ToJson](maxConcurrent: Int = 4, options: CallOptions = CallOptions.default): Pipe[F, S, R] =
+    _.parEvalMap(maxConcurrent)(client.ask(using rubric)(_, options))
+
+/** `client.askUnorderedPipe[R]`, waiting for the pipe's settings. */
+final class AskUnorderedPipe[F[_], R] private[fs2streams] (client: TypeSafeClientF[F], rubric: Rubric[R])(using Async[F]):
+  def apply[S: ToJson](maxConcurrent: Int = 4, options: CallOptions = CallOptions.default): Pipe[F, S, R] =
+    _.parEvalMapUnordered(maxConcurrent)(client.ask(using rubric)(_, options))
+
+/** `client.askEitherPipe[R]`, waiting for the pipe's settings. */
+final class AskEitherPipe[F[_], R] private[fs2streams] (client: TypeSafeClientF[F], rubric: Rubric[R])(using F: Async[F]):
+  def apply[S: ToJson](
+      maxConcurrent: Int = 4,
+      options: CallOptions = CallOptions.default
+  ): Pipe[F, S, (S, Either[TypeSafeException, R])] =
+    _.parEvalMap(maxConcurrent)(state => F.map(client.askEither(using rubric)(state, options))(state -> _))

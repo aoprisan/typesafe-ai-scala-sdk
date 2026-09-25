@@ -3,6 +3,7 @@ package typesafe
 import scala.deriving.Mirror
 import scala.quoted.*
 
+import typesafe.internal.RubricSupport
 import typesafe.rubric.{choice as choiceA, named as namedA, noul as noulA, option as optionA, score as scoreA}
 
 /** `derives Rubric` and `derives RubricChoice`. The annotations are read here to check what can be

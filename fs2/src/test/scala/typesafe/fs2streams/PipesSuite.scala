@@ -5,6 +5,10 @@ import fs2.Stream
 import scala.concurrent.duration.*
 import typesafe.*
 import typesafe.catseffect.*
+import typesafe.rubric.*
+
+/** The rubric the ask pipes decode into: the same single question the suite asks by hand. */
+final case class Urgency(@noul("The message conveys urgency") isUrgent: Double) derives Rubric
 
 class PipesSuite extends munit.CatsEffectSuite:
   private val api = MockApi()
@@ -145,4 +149,45 @@ class PipesSuite extends munit.CatsEffectSuite:
           case (other, i)                         => fail(s"unexpected outcome for ticket $i: $other")
         }
       }
+  }
+
+  test("askPipe decodes each state's answers into the rubric, in input order") {
+    answerInReverse()
+    Stream
+      .emits(states)
+      .through(client.askPipe[Urgency](maxConcurrent = states.size))
+      .compile
+      .toVector
+      .map { got =>
+        assertEquals(got, states.indices.map(i => Urgency(s"0.$i".toDouble)).toVector)
+        assertEquals(Json.unsafeParse(api.requests.head.body).get("questions"), Some(Rubric[Urgency].questions.toJson))
+      }
+  }
+
+  test("askUnorderedPipe emits as answers arrive") {
+    answerInReverse()
+    Stream.emits(states).through(client.askUnorderedPipe[Urgency](maxConcurrent = states.size)).compile.toVector.map { got =>
+      val nouls = got.map(_.isUrgent)
+      assertEquals(nouls.sorted, states.indices.map(i => s"0.$i".toDouble).toVector)
+      assertNotEquals(nouls, nouls.sorted, "answers should not have been re-ordered back into input order")
+    }
+  }
+
+  test("askEitherPipe keeps each state with its decoded answers or the SDK's failure") {
+    api.respondTo { r =>
+      indexOf(r) match
+        case 1 => Reply(400, """{"error":{"message":"nope"}}""")
+        // An answer of another type: the rubric cannot hold it.
+        case 2 => Reply(200, """{"model":"m","answers":{"is_urgent":{"type":"score","score":1,"confidence":1,"legend":{},"probabilities":{}}},"usage":{}}""")
+        case i => Reply(200, answer(i))
+    }
+    Stream.emits(states).through(client.askEitherPipe[Urgency](maxConcurrent = 3)).compile.toVector.map { got =>
+      assertEquals(got.map(_._1), states)
+      got.zipWithIndex.foreach {
+        case ((_, Left(e: ApiException)), 1)                => assertEquals(e.status, 400)
+        case ((_, Left(e: ResponseValidationException)), 2) => assertEquals(e.fieldPath, "answers.is_urgent")
+        case ((_, Right(u)), i) if i > 2 || i == 0          => assertEquals(u, Urgency(s"0.$i".toDouble))
+        case (other, i)                                     => fail(s"unexpected outcome for ticket $i: $other")
+      }
+    }
   }

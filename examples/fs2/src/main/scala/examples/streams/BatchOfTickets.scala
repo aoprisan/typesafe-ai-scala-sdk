@@ -32,7 +32,7 @@ object BatchOfTickets extends IOApp.Simple:
     Resource.make(IO(Demo.open()))(d => IO(d.release())).map(_.config)
 
   def run: IO[Unit] =
-    Stream.resource(settings).flatMap(config => TypeSafeStream.resource[IO](config)).flatMap { client =>
+    Stream.resource(settings).flatMap(config => TypeSafeStream.stream[IO](config)).flatMap { client =>
       // 1. In input order, at most 4 calls in flight. The first failure that survives the retry
       //    policy fails the stream — the right default for a job that must be complete or not at all.
       val ordered =

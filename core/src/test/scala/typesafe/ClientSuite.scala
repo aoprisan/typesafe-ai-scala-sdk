@@ -248,9 +248,9 @@ class ClientSuite extends munit.FunSuite:
     assertEquals(api.requests.size, 0)
   }
 
-  test("async and Future variants") {
+  test("the Future variant answers as the blocking call does and fails with the typed exception") {
     api.respond(_ => Reply(200, okBody))
-    val a = client().systemOneAsync("x", questions).get()
+    val a = client().systemOne("x", questions)
     val f = Await.result(client().systemOneFuture("x", questions), 5.seconds)
     assertEquals(a.answers, f.answers)
     api.respond(_ => Reply(401, """{"detail":"Invalid API key"}"""))
@@ -258,7 +258,7 @@ class ClientSuite extends munit.FunSuite:
     assertEquals(err.asInstanceOf[ApiException].kind, ApiErrorKind.Authentication)
   }
 
-  test("cancelling the returned future aborts the call and stops retrying") {
+  test("cancelling the future the bindings build on aborts the call and stops retrying") {
     api.respond(_ => Reply(503, delay = 200.millis)) // retryable: without cancellation this loops
     val f = client().systemOneAsync("x", questions)
     val deadline = System.nanoTime() + 5.seconds.toNanos
@@ -272,10 +272,18 @@ class ClientSuite extends munit.FunSuite:
   test("list models") {
     api.respond(_ => Reply(200, """{"models":[{"name":"jev-latest","description":"Flagship","release_date":"2026-05-01"}]}"""))
     val res = client().models.list()
-    assertEquals(res.models, Vector(ModelMetadata("jev-latest", "Flagship", "2026-05-01")))
+    assertEquals(res.models, Vector(ModelMetadata("jev-latest", "Flagship", java.time.LocalDate.of(2026, 5, 1))))
     val r = api.requests.head
     assertEquals((r.method, r.path), ("GET", "/v1/models"))
     assertEquals(r.header("content-type"), None)
+  }
+
+  test("a release date that is not an ISO date is a validation failure naming the field") {
+    api.respond(_ => Reply(200, """{"models":[{"name":"jev-latest","description":"Flagship","release_date":"May 1, 2026"}]}"""))
+    val e = intercept[ResponseValidationException](client().models.list())
+    assertEquals(e.fieldPath, "models[0].release_date")
+    assert(e.detail.contains("May 1, 2026"), e.detail)
+    assertEquals(e.status, 200)
   }
 
   test("the Either variants put the SDK's own failures in the value") {

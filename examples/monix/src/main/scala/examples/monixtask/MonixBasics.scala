@@ -8,7 +8,7 @@ import scala.concurrent.duration.*
 import typesafe.*
 import typesafe.monixeffect.*
 
-/** The Monix binding: the same client as a `Task`, with the lifetime handled by `use`.
+/** The Monix binding: the same client as a `Task`, with the lifetime handled by a `Resource`.
   *
   * Monix 3.x sits on Cats Effect 2, so this module can never share a classpath with the Cats Effect
   * 3 ones — which is why these examples live in their own sbt module too.
@@ -37,8 +37,9 @@ object MonixBasics:
   def main(args: Array[String]): Unit =
     val demo = Demo.open()
 
-    // `use` builds the client, runs the body and closes it on success, failure or cancellation.
-    val program: Task[Unit] = TypeSafeClientTask.use(demo.config) { client =>
+    // The resource builds the client, and `use` runs the body and closes it on success, failure or
+    // cancellation.
+    val program: Task[Unit] = TypeSafeClientTask.resource(demo.config).use { client =>
       for
         models <- client.models.list()
         _      <- Task(println(s"models    → ${models.models.map(_.name).mkString(", ")}"))

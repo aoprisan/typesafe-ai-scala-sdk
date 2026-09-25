@@ -24,7 +24,7 @@ always use the fake, because the real API cannot be asked to misbehave on cue.
 | ----------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `examples/runMain examples.triage`              | the quick start: named questions, typed answers, routing on confidence                     |
 | `examples/runMain examples.typedState`          | `derives ToJson` state, JSON instructions and rubrics, a choice mapped back onto an enum   |
-| `examples/runMain examples.asyncCalls`          | blocking vs `Future` vs `CompletableFuture`, and what cancelling one does                  |
+| `examples/runMain examples.asyncCalls`          | blocking vs `Future`, and a `CompletionStage` for Java callers                            |
 | `examples/runMain examples.errorsAndRetries`    | every failure the SDK can raise, retries, `Retry-After`, a custom `retryIf`                |
 | `examples/runMain examples.configuration`       | `ClientConfig`, per-call `CallOptions`, `RawQuestion`, `extraBody`, listing models         |
 | `examples/runMain examples.rubrics`             | a case class as the rubric: `derives Rubric`, an enum as a choice, `client.ask[TicketTriage]`|
@@ -49,7 +49,7 @@ always use the fake, because the real API cannot be asked to misbehave on cue.
 
 | Run                                                      | Shows                                                           |
 | -------------------------------------------------------- | ---------------------------------------------------------------- |
-| `examplesMonix/runMain examples.monixtask.MonixBasics`   | `TypeSafeClientTask.use`, `parSequenceN`, cancelling a call       |
+| `examplesMonix/runMain examples.monixtask.MonixBasics`   | `TypeSafeClientTask.resource`, `parSequenceN`, cancelling a call  |
 
 Monix 3.x is built on Cats Effect 2, so it cannot share a classpath with the Cats Effect 3 modules —
 which is why these samples are their own module rather than living next to the others.
