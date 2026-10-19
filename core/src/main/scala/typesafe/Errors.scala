@@ -27,6 +27,10 @@ object Constants:
   private[typesafe] val RuntimeHeader = "X-TypeSafe-Runtime"
   private[typesafe] val RetryCountHeader = "X-TypeSafe-Retry-Count"
   private[typesafe] val RequestIdHeader = "x-typesafe-request-id"
+  /** Opts a call into images and box questions (Jev 1.13+, experimental). */
+  private[typesafe] val ImagesHeader = "TypeSafe-Danger-Zone-Images"
+  /** Opts a call into 262k-token context, from 64k per request and 32k per question (experimental). */
+  private[typesafe] val LongContextHeader = "TypeSafe-Danger-Zone-Long-Context"
   private[typesafe] val RetryAfterHeader = "retry-after"
   private[typesafe] val RetryAfterMsHeader = "retry-after-ms"
   private[typesafe] val Protected = Set("authorization", "accept", "user-agent", "x-typesafe-sdk", "x-typesafe-runtime", "content-type")

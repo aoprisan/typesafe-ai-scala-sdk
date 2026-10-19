@@ -40,7 +40,8 @@ class PublicApiSuite extends munit.FunSuite:
 
   test("answer kinds carry their wire names") {
     assertEquals(NoulAnswer(0.5).kind, AnswerKind.Noul)
-    assertEquals(AnswerKind.values.map(_.wire).toList, List("noul", "choice", "score"))
+    assertEquals(AnswerKind.values.map(_.wire).toList, List("noul", "choice", "score", "box"))
+    assertEquals(AnswerKind.fromWire("box"), Some(AnswerKind.Box))
     assertEquals(AnswerKind.fromWire("score"), Some(AnswerKind.Score))
     assertEquals(AnswerKind.fromWire("future"), None)
   }

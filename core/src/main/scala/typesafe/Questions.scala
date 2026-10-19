@@ -89,6 +89,22 @@ object Score:
   def apply[A: ToJson](instructions: A, levels: String*): Score =
     new Score(instructionsOf(instructions), levels.map(Json.Str(_)).toVector)
 
+/** Locate one thing in an image; the answer is a [[BoxAnswer]].
+  *
+  * Jev 1.14 (`jev-1.14.0`, `jev-preview`) and later only, and experimental: a call that asks one is
+  * sent with `TypeSafe-Danger-Zone-Images: true`. The image goes in the call's `assets` (see
+  * [[Image]]); a box question has instructions and no criteria.
+  */
+final case class Box private[typesafe] (instructions: Option[Json]) extends Question:
+  def named(name: String): Asked[BoxAnswer] = Asked(name, this)
+
+  def toJson: Json =
+    Json.Obj(VectorMap.from(("type" -> Json.Str("box")) :: instructions.map("instructions" -> _).toList))
+
+object Box:
+  /** `Box("the front door in photo")`, naming the image by its reference. */
+  def apply[A: ToJson](instructions: A): Box = new Box(instructionsOf(instructions))
+
 /** A hand-built question object, passed through after light validation (must have a non-empty
   * string `type`). Useful for fields this SDK version does not model.
   */
@@ -96,7 +112,7 @@ final case class RawQuestion(json: Json) extends Question:
   def toJson: Json = json
 
 /** A question with its name and the answer type it produces; read it back with `response(asked)`.
-  * Made by `.named(...)` on a [[Noul]], [[Choice]] or [[Score]], which is what ties the answer type
+  * Made by `.named(...)` on a [[Noul]], [[Choice]], [[Score]] or [[Box]], which is what ties the answer type
   * to the question.
   */
 final case class Asked[A <: Answer] private[typesafe] (name: String, question: Question)(using val tag: ClassTag[A])
@@ -109,6 +125,13 @@ final case class Questions(entries: VectorMap[String, Question]):
   def size: Int = entries.size
 
   def toJson: Json = Json.Obj(entries.map((k, q) => k -> q.toJson))
+
+  /** Whether any question is a box, which only the images opt-in may ask. */
+  private[typesafe] def asksBox: Boolean = entries.values.exists {
+    case _: Box             => true
+    case RawQuestion(json)  => json.get("type").flatMap(_.asString).contains("box")
+    case _                  => false
+  }
 
   private[typesafe] def validate(): Unit =
     if entries.isEmpty then throw InvalidRequestException("At least one question is required.")
