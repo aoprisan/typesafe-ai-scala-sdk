@@ -202,6 +202,38 @@ client.systemOne(state, questions, CallOptions(
 
 Authentication and SDK-identification headers cannot be overridden.
 
+### Images, box questions and long context (experimental)
+
+Jev 1.14 (released 2026-10-14) puts three features in a *danger zone*: they work, but TypeSafe does
+not call them production-ready, and each is opt-in by header. The SDK sends the header for you.
+
+- **Images** (Jev 1.13 and later): PNG or JPEG, 256 to 1568 pixels a side. Each image goes into
+  the call once, in `CallOptions.assets` under a reference string you choose, and the model sees it
+  wherever that reference is written — in the state, an instruction or a criterion. A call with an
+  image is sent with `TypeSafe-Danger-Zone-Images: true`, and one whose image nothing refers to is
+  refused before sending.
+- **Box questions** (Jev 1.14 only: `jev-1.14.0` or `jev-preview`): `Box` locates one thing in an
+  image and answers with a `BoxAnswer` — a `BoundingBox` (`top`, `bottom`, `left`, `right`, as
+  fractions of the image from its top-left corner) and a `confidence`. They need the images header
+  too.
+- **Long context**: 262k tokens per request and per question, up from 64k and 32k, with
+  `TypeSafe-Danger-Zone-Long-Context: true`. Slower and less accurate; turn it on for a client
+  with `ClientConfig(longContext = true)` or for one call with `CallOptions(longContext = Some(true))`.
+
+```scala
+val door = Box("the front door in photo").named("door")
+val people = Noul("photo shows at least one person").named("has_people")
+val res = client.systemOne(
+  Json.Obj(VectorMap("photo" -> Json.Str("photo"), "caption" -> Json.Str("Our new office"))),
+  Questions.of(door, people),
+  CallOptions(model = Some("jev-1.14.0"), assets = VectorMap("photo" -> Image.read(Path.of("office.jpg"))))
+)
+res(door).box.toPixels(1024, 768) // (left, top, right, bottom)
+```
+
+`jev-latest` moves from Jev 1.13.0 to 1.14.0 a week after the release; pin `jev-1.13.0` to stay
+where you are.
+
 ### Async
 
 ```scala
@@ -610,7 +642,8 @@ and `Task`.
 
 - Answer types this version does not know are skipped (logged at WARNING) and remain in `response.raw`.
 - Unknown response fields are ignored.
-- `RawQuestion(json)` sends a hand-built question; `extraBody` adds top-level fields.
+- `RawQuestion(json)` sends a hand-built question; `extraBody` adds top-level fields. A raw
+  question of type `box`, or an `assets` field, still sends the images header.
 
 ## Logging
 

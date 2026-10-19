@@ -9,6 +9,7 @@ enum AnswerKind(val wire: String):
   case Noul extends AnswerKind("noul")
   case Choice extends AnswerKind("choice")
   case Score extends AnswerKind("score")
+  case Box extends AnswerKind("box")
 
   override def toString: String = wire
 
@@ -16,7 +17,7 @@ object AnswerKind:
   /** The kind the API calls `wire`, if this SDK knows it. */
   def fromWire(wire: String): Option[AnswerKind] = values.find(_.wire == wire)
 
-/** One typed answer: a [[NoulAnswer]], [[ChoiceAnswer]] or [[ScoreAnswer]]. Sealed, so a match on it
+/** One typed answer: a [[NoulAnswer]], [[ChoiceAnswer]], [[ScoreAnswer]] or [[BoxAnswer]]. Sealed, so a match on it
   * is checked for exhaustiveness.
   */
 sealed trait Answer:
@@ -48,6 +49,24 @@ final case class ScoreAnswer(
   def kind = AnswerKind.Score
   def mostLikelyLevel: Option[Int] = probabilities.maxByOption(_._2).map(_._1)
   def roundedLevel: Int = math.max(0, math.round(score).toInt)
+
+/** Edges of a box, as fractions of the image's height and width from its top-left corner:
+  * `left < right` and `top < bottom`.
+  */
+final case class BoundingBox(top: Double, bottom: Double, left: Double, right: Double):
+  def width: Double = right - left
+  def height: Double = bottom - top
+
+  /** The box in pixels of a `width` × `height` image, as `(left, top, right, bottom)`. */
+  def toPixels(width: Int, height: Int): (Int, Int, Int, Int) =
+    def px(f: Double, size: Int) = math.round(math.min(1.0, math.max(0.0, f)) * size).toInt
+    (px(left, width), px(top, height), px(right, width), px(bottom, height))
+
+/** Where a [[Box]] question's thing is in the image, and how sure the model is. Experimental, Jev
+  * 1.14 and later.
+  */
+final case class BoxAnswer(box: BoundingBox, confidence: Double) extends Answer:
+  def kind = AnswerKind.Box
 
 /** Token counts the API reported for a call; either may be absent. */
 final case class Usage(inputTokens: Option[Long] = None, outputTokens: Option[Long] = None)
@@ -81,10 +100,12 @@ final case class SystemOneResponse(
   def noul(name: String): Option[NoulAnswer] = answers.get(name).collect { case a: NoulAnswer => a }
   def choice(name: String): Option[ChoiceAnswer] = answers.get(name).collect { case a: ChoiceAnswer => a }
   def score(name: String): Option[ScoreAnswer] = answers.get(name).collect { case a: ScoreAnswer => a }
+  def box(name: String): Option[BoxAnswer] = answers.get(name).collect { case a: BoxAnswer => a }
 
   def nouls: VectorMap[String, NoulAnswer] = answers.collect { case (k, a: NoulAnswer) => k -> a }
   def choices: VectorMap[String, ChoiceAnswer] = answers.collect { case (k, a: ChoiceAnswer) => k -> a }
   def scores: VectorMap[String, ScoreAnswer] = answers.collect { case (k, a: ScoreAnswer) => k -> a }
+  def boxes: VectorMap[String, BoxAnswer] = answers.collect { case (k, a: BoxAnswer) => k -> a }
 
 /** One model the API offers, with the date it was released. */
 final case class ModelMetadata(name: String, description: String, releaseDate: LocalDate)
@@ -154,6 +175,18 @@ private[typesafe] object Decode:
             num(field(o, "confidence", p), s"$p.confidence"),
             SortedMap.from(obj(field(o, "legend", p), lp).map((k, v) => levelKey(k, lp) -> v)),
             SortedMap.from(probs(field(o, "probabilities", p), pp).map((k, v) => levelKey(k, pp) -> v))
+          )
+        case "box" =>
+          val bp = s"$p.box"
+          val edges = obj(field(o, "box", p), bp)
+          answers += name -> BoxAnswer(
+            BoundingBox(
+              num(field(edges, "top", bp), s"$bp.top"),
+              num(field(edges, "bottom", bp), s"$bp.bottom"),
+              num(field(edges, "left", bp), s"$bp.left"),
+              num(field(edges, "right", bp), s"$bp.right")
+            ),
+            num(field(o, "confidence", p), s"$p.confidence")
           )
         case other => onUnknown(name, other)
     }

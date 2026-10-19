@@ -18,6 +18,10 @@ import scala.util.control.NonFatal
   * `record` (else `TYPESAFE_RECORD`) keeps each successful System One response under a directory,
   * and `replay` (else `TYPESAFE_REPLAY`) answers from one without the network or an API key; see
   * [[Cassette]].
+  *
+  * `longContext` opts every System One call into 262k tokens of context with
+  * `TypeSafe-Danger-Zone-Long-Context: true`; experimental, slower and less accurate. A call's own
+  * `CallOptions.longContext` wins.
   */
 final case class ClientConfig(
     apiKey: Option[String] = None,
@@ -29,7 +33,8 @@ final case class ClientConfig(
     httpClient: Option[HttpClient] = None,
     env: String => Option[String] = sys.env.get,
     record: Option[Path] = None,
-    replay: Option[Path] = None
+    replay: Option[Path] = None,
+    longContext: Boolean = false
 ):
   /** Shows every setting but the credentials: the API key, and the value of any header that
     * carries one (`Authorization`, `X-Api-Key`, a gateway's `*-token`, ...), are `[REDACTED]`, so a
@@ -38,15 +43,23 @@ final case class ClientConfig(
   override def toString: String =
     val shownHeaders = headers.map((k, v) => k -> (if Constants.isSecret(k) then "[REDACTED]" else v))
     s"ClientConfig(apiKey=${apiKey.map(_ => "[REDACTED]")}, baseUrl=$baseUrl, model=$model, timeout=$timeout, " +
-      s"retry=$retry, headers=$shownHeaders, httpClient=$httpClient, record=$record, replay=$replay)"
+      s"retry=$retry, headers=$shownHeaders, httpClient=$httpClient, record=$record, replay=$replay, " +
+      s"longContext=$longContext)"
 
-/** Per-call overrides. `extraBody` fields are shallow-merged last over `state`/`model`/`questions`. */
+/** Per-call overrides. `extraBody` fields are shallow-merged last over `state`/`model`/`questions`/`assets`.
+  *
+  * `assets` are images by the reference written where each one belongs (see [[Image]]); like a
+  * [[Box]] question they send `TypeSafe-Danger-Zone-Images: true`. `longContext` opts this call in
+  * or out of long context, whatever the client's config says. Both are experimental.
+  */
 final case class CallOptions(
     model: Option[String] = None,
     retry: Option[RetryPolicy] = None,
     timeout: Option[FiniteDuration] = None,
     headers: Map[String, String] = Map.empty,
-    extraBody: VectorMap[String, Json] = VectorMap.empty
+    extraBody: VectorMap[String, Json] = VectorMap.empty,
+    assets: VectorMap[String, Image] = VectorMap.empty,
+    longContext: Option[Boolean] = None
 )
 
 object CallOptions:
@@ -93,7 +106,8 @@ final class TypeSafeClient private (
     defaultHeaders: Map[String, String],
     apiKey: Option[String],
     http: HttpClient,
-    cassette: Option[TypeSafeClient.CassetteMode]
+    cassette: Option[TypeSafeClient.CassetteMode],
+    longContext: Boolean
 ) extends AutoCloseable:
   import TypeSafeClient.*
 
@@ -216,13 +230,42 @@ final class TypeSafeClient private (
         try ToJson[S](state)
         catch case NonFatal(e) => throw InvalidRequestException(s"The state could not be encoded as JSON: ${e.getMessage}", Some(e))
       questions.validate()
+      val questionsJson = questions.toJson
+      val assets =
+        if options.assets.isEmpty || options.extraBody.contains("assets") then VectorMap.empty
+        else
+          checkReferences(options.assets, stateJson, questionsJson)
+          VectorMap("assets" -> Json.Obj(options.assets.map((ref, image) => ref -> image.toJson)))
       val body = VectorMap(
         "state" -> stateJson,
         "model" -> Json.Str(options.model.getOrElse(defaultModel)),
-        "questions" -> questions.toJson
-      ) ++ options.extraBody
+        "questions" -> questionsJson
+      ) ++ assets ++ options.extraBody
       Right(Json.Obj(body).render)
     catch case NonFatal(e) => Left(e)
+
+  /** The danger-zone headers a call needs, under any the caller set by hand. */
+  private def withOptIns(questions: Questions, options: CallOptions): CallOptions =
+    val askedBox = options.extraBody.get("questions") match
+      case Some(q) => q.asObject.exists(_.values.exists(_.get("type").flatMap(_.asString).contains("box")))
+      case None    => questions.asksBox
+    val images = options.assets.nonEmpty || options.extraBody.contains("assets") || askedBox
+    val optIns =
+      (if images then Map(Constants.ImagesHeader -> "true") else Map.empty) ++
+        (if options.longContext.getOrElse(longContext) then Map(Constants.LongContextHeader -> "true") else Map.empty)
+    val unset = optIns.filterNot((k, _) => (defaultHeaders.keys ++ options.headers.keys).exists(_.equalsIgnoreCase(k)))
+    if unset.isEmpty then options else options.copy(headers = options.headers ++ unset)
+
+  /** Reject a reference the API would: an empty one, or one the state and questions never mention. */
+  private def checkReferences(assets: VectorMap[String, Image], state: Json, questions: Json): Unit =
+    val text = Json.Arr(Vector(state, questions)).render
+    assets.keys.foreach { ref =>
+      if ref.isEmpty then throw InvalidRequestException("An image's reference must not be empty.")
+      if !text.contains(Json.Str(ref).render.drop(1).dropRight(1)) then
+        throw InvalidRequestException(
+          s"""Image "$ref" is not referenced; write "$ref" in the state, an instruction or a criterion."""
+        )
+    }
 
   private def decodeOrFail[T](raw: Json, meta: ResponseMeta, endpoint: String)(f: Json => T): T =
     try f(raw)
@@ -242,7 +285,7 @@ final class TypeSafeClient private (
     prepareSystemOne(state, questions, options) match
       case Left(e) => throw e
       case Right(body) =>
-        val call = prepareCall("POST", Constants.SystemOnePath, Some(body), options)
+        val call = prepareCall("POST", Constants.SystemOnePath, Some(body), withOptIns(questions, options))
         if cassette.isEmpty then call else call.copy(cassetteKey = Some(Cassette.keyOf(body)))
 
   /** Everything one list-models call needs, with no request sent yet. */
@@ -507,6 +550,7 @@ object TypeSafeClient:
       defaultHeaders = config.headers,
       apiKey = key,
       cassette = cassette,
+      longContext = config.longContext,
       http = config.httpClient.getOrElse(HttpClient.newBuilder().connectTimeout(java.time.Duration.ofNanos(config.timeout.toNanos)).build())
     )
 
